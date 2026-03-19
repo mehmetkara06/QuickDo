@@ -1,5 +1,9 @@
-package com.example.to_do_list
+package com.example.to_do_list // Kendi paket adını kontrol etmeyi unutma!
 
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -16,7 +20,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material3.*
@@ -24,6 +29,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.room.*
@@ -44,25 +51,33 @@ fun formatMillisToDateString(millis: Long?): String {
     return formatter.format(Date(millis))
 }
 
+// --- GÜNCELLENMİŞ YARDIMCI FONKSİYON 2: Kalan Zamanı Hesapla ---
 fun calculateRemainingTime(dueDateMillis: Long?, dueTimeString: String?): String? {
     if (dueDateMillis == null) return null
 
     val currentMillis = System.currentTimeMillis()
-    val targetCalendar = Calendar.getInstance().apply { timeInMillis = dueDateMillis }
+    val targetCalendar = Calendar.getInstance()
+
+    // Tarihi milisaniye olarak takvime oturtuyoruz
+    targetCalendar.timeInMillis = dueDateMillis
 
     if (dueTimeString != null) {
         val parts = dueTimeString.split(":")
         if (parts.size == 2) {
             targetCalendar.set(Calendar.HOUR_OF_DAY, parts[0].toInt())
             targetCalendar.set(Calendar.MINUTE, parts[1].toInt())
-            targetCalendar.add(Calendar.HOUR_OF_DAY, -3)
+            targetCalendar.set(Calendar.SECOND, 0) // Saniyeyi sıfırladık
+            // -3 SAAT ÇIKARMA İŞLEMİNİ BURADAN DA SİLDİK!
         }
     } else {
         targetCalendar.set(Calendar.HOUR_OF_DAY, 23)
         targetCalendar.set(Calendar.MINUTE, 59)
+        targetCalendar.set(Calendar.SECOND, 59)
     }
 
     val diff = targetCalendar.timeInMillis - currentMillis
+
+    // Eğer fark eksiyse (yani zaman geçmişse) Süresi doldu yaz
     if (diff < 0) return "Süresi doldu!"
 
     val days = TimeUnit.MILLISECONDS.toDays(diff)
@@ -75,42 +90,57 @@ fun calculateRemainingTime(dueDateMillis: Long?, dueTimeString: String?): String
         else -> "$minutes dk kaldı"
     }
 }
+// --- GÜNCELLENMİŞ ALARM KURUCU FONKSİYON ---
+fun scheduleNotification(context: Context, taskId: Int, title: String, notes: String, dueDateMillis: Long?, dueTimeString: String?, priority: Int?) {
+    if (dueDateMillis == null) return
+    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    val intent = Intent(context, NotificationReceiver::class.java).apply {
+        putExtra("taskId", taskId)
+        putExtra("title", title)
+        putExtra("message", notes.ifBlank { "Zamanı geldi!" })
+        putExtra("priority", priority ?: 3)
+    }
+    val pendingIntent = PendingIntent.getBroadcast(context, taskId, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+
+    val targetCalendar = Calendar.getInstance().apply { timeInMillis = dueDateMillis }
+    if (dueTimeString != null) {
+        val parts = dueTimeString.split(":")
+        if (parts.size == 2) {
+            targetCalendar.set(Calendar.HOUR_OF_DAY, parts[0].toInt())
+            targetCalendar.set(Calendar.MINUTE, parts[1].toInt())
+            targetCalendar.set(Calendar.SECOND, 0) // Saniyeyi sıfırladık
+            // -3 ÇIKARMA İŞLEMİ BURADAN SİLİNDİ!
+        }
+    } else {
+        targetCalendar.set(Calendar.HOUR_OF_DAY, 9)
+        targetCalendar.set(Calendar.MINUTE, 0)
+        targetCalendar.set(Calendar.SECOND, 0)
+    }
+
+    // Eğer saat geçmişse alarm kurma (Zaman yolculuğu yapamayız)
+    if (targetCalendar.timeInMillis <= System.currentTimeMillis()) return
+
+    try {
+        alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, targetCalendar.timeInMillis, pendingIntent)
+    } catch (e: SecurityException) {
+        alarmManager.set(AlarmManager.RTC_WAKEUP, targetCalendar.timeInMillis, pendingIntent)
+    }
+}
 
 @Composable
-fun TimePickerDialog(
-    onDismissRequest: () -> Unit,
-    confirmButton: @Composable () -> Unit,
-    dismissButton: @Composable () -> Unit,
-    content: @Composable () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismissRequest,
-        modifier = Modifier.fillMaxWidth(),
-        title = { Text("Saat Seçin") },
-        text = { content() },
-        confirmButton = confirmButton,
-        dismissButton = dismissButton
-    )
+fun TimePickerDialog(onDismissRequest: () -> Unit, confirmButton: @Composable () -> Unit, dismissButton: @Composable () -> Unit, content: @Composable () -> Unit) {
+    AlertDialog(onDismissRequest = onDismissRequest, modifier = Modifier.fillMaxWidth(), title = { Text("Saat Seçin") }, text = { content() }, confirmButton = confirmButton, dismissButton = dismissButton)
 }
 
 // --- 1. VERİ MODELLERİ ---
 @Entity(tableName = "category_table")
-data class Category(
-    @PrimaryKey(autoGenerate = true) val id: Int = 0,
-    val name: String,
-    val colorCode: Long
-)
+data class Category(@PrimaryKey(autoGenerate = true) val id: Int = 0, val name: String, val colorCode: Long)
 
 @Entity(tableName = "todo_table")
 data class TodoItem(
-    @PrimaryKey(autoGenerate = true) val id: Int = 0,
-    val title: String,
-    val isDone: Boolean = false,
-    val dueDate: Long? = null,
-    val notes: String = "",
-    val dueTime: String? = null,
-    val priority: Int? = null,
-    val categoryId: Int? = null
+    @PrimaryKey(autoGenerate = true) val id: Int = 0, val title: String, val isDone: Boolean = false, val dueDate: Long? = null,
+    val notes: String = "", val dueTime: String? = null, val priority: Int? = null, val categoryId: Int? = null,
+    val hasReminder: Boolean = false // YENİ: İsteğe Bağlı Alarm Hafızası
 )
 
 // --- 2. VERİTABANI SORGULARI ---
@@ -119,32 +149,22 @@ interface TodoDao {
     @Query("SELECT * FROM todo_table ORDER BY isDone ASC, priority DESC, id DESC")
     fun getAll(): Flow<List<TodoItem>>
 
-    @Insert
-    suspend fun insert(item: TodoItem)
-
-    @Delete
-    suspend fun delete(item: TodoItem)
-
-    @Update
-    suspend fun update(item: TodoItem)
+    @Insert suspend fun insert(item: TodoItem): Long // YENİ: ID döndürüyor
+    @Delete suspend fun delete(item: TodoItem)
+    @Update suspend fun update(item: TodoItem)
 
     @Query("SELECT * FROM category_table")
     fun getAllCategories(): Flow<List<Category>>
-
-    @Insert
-    suspend fun insertCategory(category: Category)
-
-    // Uygulama ilk açıldığında tablo boş mu diye bakmak için
+    @Insert suspend fun insertCategory(category: Category)
     @Query("SELECT COUNT(*) FROM category_table")
     suspend fun getCategoryCount(): Int
 }
 
 @Database(entities = [TodoItem::class, Category::class], version = 1)
-abstract class AppDatabase : RoomDatabase() {
-    abstract fun todoDao(): TodoDao
-}
+abstract class AppDatabase : RoomDatabase() { abstract fun todoDao(): TodoDao }
 
 enum class AppScreen { TASKS, CALENDAR, ADD_TASK }
+enum class SortType(val label: String) { DEFAULT("Varsayılan Sıralama"), DATE_ASC("Önce Yakın Tarihliler"), DATE_DESC("Önce Uzak Tarihliler"), PRIORITY("Önce En Önemliler") }
 
 // --- 3. ANA AKTİVİTE ---
 class MainActivity : ComponentActivity() {
@@ -152,74 +172,112 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val db = Room.databaseBuilder(applicationContext, AppDatabase::class.java, "todo-db").build()
         val dao = db.todoDao()
-
-        setContent {
-            MaterialTheme {
-                Surface(color = MaterialTheme.colorScheme.background) {
-                    MainAppScaffold(dao)
-                }
-            }
-        }
+        setContent { MaterialTheme { Surface(color = MaterialTheme.colorScheme.background) { MainAppScaffold(dao) } } }
     }
 }
 
-// --- 4. ANA İSKELET VE VERİTABANI TOHUMLAMA (PRE-POPULATE) ---
+// --- 4. ANA İSKELET VE NAVİGASYON ---
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainAppScaffold(dao: TodoDao) {
     var currentScreen by remember { mutableStateOf(AppScreen.TASKS) }
-    var menuExpanded by remember { mutableStateOf(false) }
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    val categories by dao.getAllCategories().collectAsState(initial = emptyList())
+    val allTasks by dao.getAll().collectAsState(initial = emptyList())
+    var showFilterDialog by remember { mutableStateOf(false) }
+    var currentSortType by remember { mutableStateOf(SortType.DEFAULT) }
+    var currentCategoryFilter by remember { mutableStateOf<Category?>(null) }
 
-    // YENİ: Uygulama açıldığında kategori yoksa hazır şablonları ekle
     LaunchedEffect(Unit) {
         if (dao.getCategoryCount() == 0) {
-            dao.insertCategory(Category(name = "💊 İlaç Hatırlatıcısı", colorCode = 0xFFE53935)) // Kırmızı
-            dao.insertCategory(Category(name = "🎂 Doğum Günü", colorCode = 0xFFE91E63)) // Pembe
-            dao.insertCategory(Category(name = "📚 Sınav Takvimi", colorCode = 0xFF2196F3)) // Mavi
+            dao.insertCategory(Category(name = "💊 İlaç Hatırlatıcısı", colorCode = 0xFFE53935))
+            dao.insertCategory(Category(name = "🎂 Doğum Günü", colorCode = 0xFFE91E63))
+            dao.insertCategory(Category(name = "📚 Sınav Takvimi", colorCode = 0xFF2196F3))
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(when(currentScreen) { AppScreen.TASKS -> "QuickDo"; AppScreen.CALENDAR -> "Takvim"; AppScreen.ADD_TASK -> "Yeni Görev Ekle" }) },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-                actions = {
-                    IconButton(onClick = { menuExpanded = true }) { Icon(Icons.Default.MoreVert, "Menü") }
-                    DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                        DropdownMenuItem(text = { Text("Görevlerim") }, onClick = { currentScreen = AppScreen.TASKS; menuExpanded = false })
-                        DropdownMenuItem(text = { Text("Takvim") }, onClick = { currentScreen = AppScreen.CALENDAR; menuExpanded = false })
+    if (showFilterDialog) {
+        AlertDialog(
+            onDismissRequest = { showFilterDialog = false },
+            title = { Text("Filtrele ve Sırala") },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text("Sıralama Ölçütü", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    SortType.values().forEach { sortType ->
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { currentSortType = sortType }.padding(vertical = 4.dp)) {
+                            RadioButton(selected = currentSortType == sortType, onClick = { currentSortType = sortType })
+                            Text(text = sortType.label, modifier = Modifier.padding(start = 8.dp))
+                        }
+                    }
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    Text("Kategori Filtresi", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { currentCategoryFilter = null }.padding(vertical = 4.dp)) {
+                        RadioButton(selected = currentCategoryFilter == null, onClick = { currentCategoryFilter = null })
+                        Text("Tüm Kategoriler", modifier = Modifier.padding(start = 8.dp))
+                    }
+                    categories.forEach { cat ->
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { currentCategoryFilter = cat }.padding(vertical = 4.dp)) {
+                            RadioButton(selected = currentCategoryFilter == cat, onClick = { currentCategoryFilter = cat })
+                            Box(modifier = Modifier.padding(start = 8.dp).size(12.dp).background(Color(cat.colorCode), CircleShape))
+                            Text(cat.name, modifier = Modifier.padding(start = 8.dp))
+                        }
                     }
                 }
-            )
-        },
-        floatingActionButton = {
-            if (currentScreen == AppScreen.TASKS) {
-                FloatingActionButton(onClick = { currentScreen = AppScreen.ADD_TASK }) { Icon(Icons.Default.Add, "Görev Ekle") }
+            },
+            confirmButton = { TextButton(onClick = { showFilterDialog = false }) { Text("Uygula") } }
+        )
+    }
+
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ModalDrawerSheet {
+                Spacer(Modifier.height(24.dp))
+                Text("QuickDo", modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
+                HorizontalDivider()
+                NavigationDrawerItem(label = { Text("📋 Görevlerim") }, selected = currentScreen == AppScreen.TASKS, onClick = { currentScreen = AppScreen.TASKS; scope.launch { drawerState.close() } }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
+                NavigationDrawerItem(label = { Text("📅 Takvim") }, selected = currentScreen == AppScreen.CALENDAR, onClick = { currentScreen = AppScreen.CALENDAR; scope.launch { drawerState.close() } }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
             }
         }
-    ) { paddingValues ->
-        Box(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
-            when (currentScreen) {
-                AppScreen.TASKS -> TaskListScreen(dao)
-                AppScreen.CALENDAR -> CalendarViewScreen(dao)
-                AppScreen.ADD_TASK -> AddTaskScreen(dao = dao, onNavigateBack = { currentScreen = AppScreen.TASKS })
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text(when(currentScreen) { AppScreen.TASKS -> "Görevlerim"; AppScreen.CALENDAR -> "Takvim"; AppScreen.ADD_TASK -> "Yeni Görev" }) },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                    navigationIcon = { IconButton(onClick = { scope.launch { drawerState.open() } }) { Icon(Icons.Default.Menu, "Menüyü Aç") } },
+                    actions = { if (currentScreen == AppScreen.TASKS) { IconButton(onClick = { showFilterDialog = true }) { Text("🔽", style = MaterialTheme.typography.titleLarge) } } }
+                )
+            },
+            floatingActionButton = { if (currentScreen == AppScreen.TASKS) { FloatingActionButton(onClick = { currentScreen = AppScreen.ADD_TASK }) { Icon(Icons.Default.Add, "Görev Ekle") } } }
+        ) { paddingValues ->
+            Box(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
+                when (currentScreen) {
+                    AppScreen.TASKS -> TaskListScreen(dao, allTasks, categories, currentSortType, currentCategoryFilter)
+                    AppScreen.CALENDAR -> CalendarViewScreen(dao, allTasks, categories)
+                    AppScreen.ADD_TASK -> AddTaskScreen(dao = dao, onNavigateBack = { currentScreen = AppScreen.TASKS })
+                }
             }
         }
     }
 }
 
-// --- 5. GÖREV EKLEME EKRANI (AÇILIR KATEGORİ MENÜSÜ EKLENDİ) ---
+// --- 5. GÖREV EKLEME EKRANI (İSTEĞE BAĞLI ALARM EKLENDİ) ---
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
+    val context = LocalContext.current // Alarm kurmak için gerekli
     var text by remember { mutableStateOf("") }
     var notesText by remember { mutableStateOf("") }
     var selectedDate by remember { mutableStateOf<Long?>(null) }
     var selectedTime by remember { mutableStateOf<String?>(null) }
     var selectedPriority by remember { mutableStateOf<Int?>(null) }
 
-    // YENİ: Kategori Durumları
+    // YENİ: Hatırlatıcı Açık/Kapalı Durumu
+    var hasReminder by remember { mutableStateOf(false) }
+
     val categories by dao.getAllCategories().collectAsState(initial = emptyList())
     var selectedCategory by remember { mutableStateOf<Category?>(null) }
     var expandedCategoryMenu by remember { mutableStateOf(false) }
@@ -231,112 +289,44 @@ fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
     val datePickerState = rememberDatePickerState()
     val timePickerState = rememberTimePickerState(is24Hour = true)
 
-    // --- YENİ KATEGORİ OLUŞTURMA DİYALOĞU ---
     if (showNewCategoryDialog) {
         var newCatName by remember { mutableStateOf("") }
-        // Sabit Renk Paletimiz
         val colorPalette = listOf(0xFFE53935, 0xFFE91E63, 0xFF9C27B0, 0xFF3F51B5, 0xFF2196F3, 0xFF009688, 0xFF4CAF50, 0xFFFF9800, 0xFF795548)
         var selectedColorCode by remember { mutableStateOf(colorPalette[0]) }
 
         AlertDialog(
-            onDismissRequest = { showNewCategoryDialog = false },
-            title = { Text("Yeni Kategori") },
+            onDismissRequest = { showNewCategoryDialog = false }, title = { Text("Yeni Kategori") },
             text = {
                 Column {
-                    OutlinedTextField(value = newCatName, onValueChange = { newCatName = it }, label = { Text("Kategori Adı (Örn: Spor 🏋️)") }, singleLine = true)
+                    OutlinedTextField(value = newCatName, onValueChange = { newCatName = it }, label = { Text("Kategori Adı") }, singleLine = true)
                     Spacer(modifier = Modifier.height(16.dp))
                     Text("Renk Seçin:", style = MaterialTheme.typography.labelMedium)
                     Spacer(modifier = Modifier.height(8.dp))
-                    // Renk Paleti (Yuvarlak Butonlar)
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         items(colorPalette) { colorCode ->
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .background(Color(colorCode), CircleShape)
-                                    .border(if (selectedColorCode == colorCode) 3.dp else 0.dp, Color.Black.copy(alpha = 0.5f), CircleShape)
-                                    .clickable { selectedColorCode = colorCode }
-                            )
+                            Box(modifier = Modifier.size(36.dp).background(Color(colorCode), CircleShape).border(if (selectedColorCode == colorCode) 3.dp else 0.dp, Color.Black.copy(alpha = 0.5f), CircleShape).clickable { selectedColorCode = colorCode })
                         }
                     }
                 }
             },
-            confirmButton = {
-                TextButton(onClick = {
-                    if (newCatName.isNotBlank()) {
-                        scope.launch {
-                            dao.insertCategory(Category(name = newCatName, colorCode = selectedColorCode))
-                            showNewCategoryDialog = false
-                        }
-                    }
-                }) { Text("Oluştur") }
-            },
+            confirmButton = { TextButton(onClick = { if (newCatName.isNotBlank()) { scope.launch { dao.insertCategory(Category(name = newCatName, colorCode = selectedColorCode)); showNewCategoryDialog = false } } }) { Text("Oluştur") } },
             dismissButton = { TextButton(onClick = { showNewCategoryDialog = false }) { Text("İptal") } }
         )
     }
 
-    // Diğer Diyaloglar (Tarih ve Saat)
-    if (showDatePicker) {
-        DatePickerDialog(
-            onDismissRequest = { showDatePicker = false },
-            confirmButton = { TextButton(onClick = { selectedDate = datePickerState.selectedDateMillis; showDatePicker = false }) { Text("Tamam") } },
-            dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("İptal") } }
-        ) { DatePicker(state = datePickerState) }
-    }
-
-    if (showTimePicker) {
-        TimePickerDialog(
-            onDismissRequest = { showTimePicker = false },
-            confirmButton = {
-                TextButton(onClick = {
-                    val hour = timePickerState.hour.toString().padStart(2, '0'); val minute = timePickerState.minute.toString().padStart(2, '0')
-                    selectedTime = "$hour:$minute"; showTimePicker = false
-                }) { Text("Tamam") }
-            },
-            dismissButton = { TextButton(onClick = { showTimePicker = false }) { Text("İptal") } }
-        ) { TimePicker(state = timePickerState, modifier = Modifier.fillMaxWidth()) }
-    }
+    if (showDatePicker) { DatePickerDialog(onDismissRequest = { showDatePicker = false }, confirmButton = { TextButton(onClick = { selectedDate = datePickerState.selectedDateMillis; showDatePicker = false }) { Text("Tamam") } }, dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("İptal") } }) { DatePicker(state = datePickerState) } }
+    if (showTimePicker) { TimePickerDialog(onDismissRequest = { showTimePicker = false }, confirmButton = { TextButton(onClick = { val hour = timePickerState.hour.toString().padStart(2, '0'); val minute = timePickerState.minute.toString().padStart(2, '0'); selectedTime = "$hour:$minute"; showTimePicker = false }) { Text("Tamam") } }, dismissButton = { TextButton(onClick = { showTimePicker = false }) { Text("İptal") } }) { TimePicker(state = timePickerState, modifier = Modifier.fillMaxWidth()) } }
 
     Column(modifier = Modifier.padding(16.dp).fillMaxSize()) {
         OutlinedTextField(value = text, onValueChange = { text = it }, label = { Text("Ne yapılması gerekiyor?") }, modifier = Modifier.fillMaxWidth())
         Spacer(modifier = Modifier.height(8.dp))
 
-        // --- YENİ: KATEGORİ SEÇİCİ ---
-        ExposedDropdownMenuBox(
-            expanded = expandedCategoryMenu,
-            onExpandedChange = { expandedCategoryMenu = !expandedCategoryMenu }
-        ) {
-            OutlinedTextField(
-                value = selectedCategory?.name ?: "Kategori Seç (İsteğe Bağlı)",
-                onValueChange = {},
-                readOnly = true,
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedCategoryMenu) },
-                colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
-                modifier = Modifier.menuAnchor().fillMaxWidth()
-            )
-            ExposedDropdownMenu(
-                expanded = expandedCategoryMenu,
-                onDismissRequest = { expandedCategoryMenu = false }
-            ) {
-                // Kayıtlı Kategorileri Listele
-                categories.forEach { cat ->
-                    DropdownMenuItem(
-                        text = {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(modifier = Modifier.size(12.dp).background(Color(cat.colorCode), CircleShape))
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(cat.name)
-                            }
-                        },
-                        onClick = { selectedCategory = cat; expandedCategoryMenu = false }
-                    )
-                }
+        ExposedDropdownMenuBox(expanded = expandedCategoryMenu, onExpandedChange = { expandedCategoryMenu = !expandedCategoryMenu }) {
+            OutlinedTextField(value = selectedCategory?.name ?: "Kategori Seç (İsteğe Bağlı)", onValueChange = {}, readOnly = true, trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedCategoryMenu) }, colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(), modifier = Modifier.menuAnchor().fillMaxWidth())
+            ExposedDropdownMenu(expanded = expandedCategoryMenu, onDismissRequest = { expandedCategoryMenu = false }) {
+                categories.forEach { cat -> DropdownMenuItem(text = { Row(verticalAlignment = Alignment.CenterVertically) { Box(modifier = Modifier.size(12.dp).background(Color(cat.colorCode), CircleShape)); Spacer(modifier = Modifier.width(8.dp)); Text(cat.name) } }, onClick = { selectedCategory = cat; expandedCategoryMenu = false }) }
                 Divider()
-                // Yeni Kategori Ekleme Butonu
-                DropdownMenuItem(
-                    text = { Text("➕ Yeni Kategori Oluştur", color = MaterialTheme.colorScheme.primary) },
-                    onClick = { expandedCategoryMenu = false; showNewCategoryDialog = true }
-                )
+                DropdownMenuItem(text = { Text("➕ Yeni Kategori Oluştur", color = MaterialTheme.colorScheme.primary) }, onClick = { expandedCategoryMenu = false; showNewCategoryDialog = true })
             }
         }
 
@@ -346,25 +336,28 @@ fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
 
         Text("Önem Derecesi (İsteğe Bağlı):", style = MaterialTheme.typography.bodyMedium)
         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.Center) {
-            for (i in 1..5) {
-                IconButton(onClick = { selectedPriority = if (selectedPriority == i) null else i }) {
-                    Icon(
-                        imageVector = if (selectedPriority != null && i <= selectedPriority!!) Icons.Filled.Star else Icons.Outlined.Star,
-                        contentDescription = "$i Yıldız", tint = if (selectedPriority != null && i <= selectedPriority!!) Color(0xFFFFC107) else Color.Gray, modifier = Modifier.size(36.dp)
-                    )
-                }
-            }
+            for (i in 1..5) { IconButton(onClick = { selectedPriority = if (selectedPriority == i) null else i }) { Icon(imageVector = if (selectedPriority != null && i <= selectedPriority!!) Icons.Filled.Star else Icons.Outlined.Star, contentDescription = "$i Yıldız", tint = if (selectedPriority != null && i <= selectedPriority!!) Color(0xFFFFC107) else Color.Gray, modifier = Modifier.size(36.dp)) } }
         }
 
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { showDatePicker = true }, modifier = Modifier.weight(1f)) {
-                Icon(Icons.Default.DateRange, contentDescription = null)
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(if (selectedDate == null) "Tarih Ekle" else formatMillisToDateString(selectedDate))
+            OutlinedButton(onClick = { showDatePicker = true }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.DateRange, contentDescription = null); Spacer(modifier = Modifier.width(4.dp)); Text(if (selectedDate == null) "Tarih Ekle" else formatMillisToDateString(selectedDate)) }
+            OutlinedButton(onClick = { showTimePicker = true }, modifier = Modifier.weight(1f)) { Text(selectedTime ?: "Saat Ekle") }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // YENİ: İsteğe Bağlı Hatırlatıcı Seçeneği (Switch)
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Notifications, contentDescription = null, tint = if (hasReminder) MaterialTheme.colorScheme.primary else Color.Gray)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Bana Hatırlat (Alarm Kur)", style = MaterialTheme.typography.bodyLarge)
             }
-            OutlinedButton(onClick = { showTimePicker = true }, modifier = Modifier.weight(1f)) {
-                Text(selectedTime ?: "Saat Ekle")
-            }
+            Switch(checked = hasReminder, onCheckedChange = { hasReminder = it })
         }
 
         Spacer(modifier = Modifier.weight(1f))
@@ -374,8 +367,16 @@ fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
             Button(onClick = {
                 if (text.isNotBlank()) {
                     scope.launch {
-                        // Kategori seçildiyse ID'sini, seçilmediyse null gönderiyoruz
-                        dao.insert(TodoItem(title = text, dueDate = selectedDate, dueTime = selectedTime, priority = selectedPriority, notes = notesText, categoryId = selectedCategory?.id))
+                        // 1. Görevi oluştur (hasReminder bilgisiyle)
+                        val newItem = TodoItem(title = text, dueDate = selectedDate, dueTime = selectedTime, priority = selectedPriority, notes = notesText, categoryId = selectedCategory?.id, hasReminder = hasReminder)
+                        // 2. Veritabanına kaydet ve yeni ID'yi yakala
+                        val insertedId = dao.insert(newItem).toInt()
+
+                        // 3. EĞER kullanıcı "Bana Hatırlat" dediyse ve tarih seçtiyse Alarmı Kur!
+                        if (hasReminder && selectedDate != null) {
+                            scheduleNotification(context, insertedId, text, notesText, selectedDate, selectedTime, selectedPriority)
+                        }
+
                         onNavigateBack()
                     }
                 }
@@ -386,24 +387,22 @@ fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
 
 // --- 6. GÖREV LİSTESİ EKRANI ---
 @Composable
-fun TaskListScreen(dao: TodoDao) {
-    val items by dao.getAll().collectAsState(initial = emptyList())
-    // YENİ: Kartlara renk basmak için kategorileri de çekiyoruz
-    val categories by dao.getAllCategories().collectAsState(initial = emptyList())
+fun TaskListScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<Category>, sortType: SortType, filterCategory: Category?) {
     val scope = rememberCoroutineScope()
+    var displayItems = if (filterCategory == null) allTasks else allTasks.filter { it.categoryId == filterCategory.id }
+    displayItems = when(sortType) {
+        SortType.DEFAULT -> displayItems
+        SortType.DATE_ASC -> displayItems.sortedWith(compareBy({ it.isDone }, { it.dueDate ?: Long.MAX_VALUE }))
+        SortType.DATE_DESC -> displayItems.sortedWith(compareBy({ it.isDone }, { -(it.dueDate ?: 0L) }))
+        SortType.PRIORITY -> displayItems.sortedWith(compareBy({ it.isDone }, { -(it.priority ?: 0) }))
+    }
 
-    if (items.isEmpty()) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Görev yok. Sağ alttaki + butonuna tıkla!") }
+    if (displayItems.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (filterCategory == null) "Görev yok. Sağ alttaki + butonuna tıkla!" else "Bu kriterlere uygun görev bulunamadı.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
     } else {
         LazyColumn(contentPadding = PaddingValues(16.dp)) {
-            items(items, key = { it.id }) { item ->
-                TodoItemRow(
-                    item = item,
-                    categories = categories, // Kategorileri karta yolluyoruz
-                    onCheckedChange = { isChecked -> scope.launch { dao.update(item.copy(isDone = isChecked)) } },
-                    onDeleteClick = { scope.launch { dao.delete(item) } },
-                    onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } }
-                )
+            items(displayItems, key = { it.id }) { item ->
+                TodoItemRow(item = item, categories = categories, onCheckedChange = { isChecked -> scope.launch { dao.update(item.copy(isDone = isChecked)) } }, onDeleteClick = { scope.launch { dao.delete(item) } }, onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } })
             }
         }
     }
@@ -412,111 +411,62 @@ fun TaskListScreen(dao: TodoDao) {
 // --- 7. TAKVİM EKRANI ---
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CalendarViewScreen(dao: TodoDao) {
-    val items by dao.getAll().collectAsState(initial = emptyList())
-    val categories by dao.getAllCategories().collectAsState(initial = emptyList()) // YENİ
+fun CalendarViewScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<Category>) {
     val datePickerState = rememberDatePickerState()
     val scope = rememberCoroutineScope()
-
-    val upcomingTasks = items.filter { it.dueDate != null }.sortedBy { it.dueDate }
+    val upcomingTasks = allTasks.filter { it.dueDate != null }.sortedBy { it.dueDate }
     val selectedDateString = formatMillisToDateString(datePickerState.selectedDateMillis)
-    val tasksForSelectedDate = items.filter { item -> item.dueDate != null && formatMillisToDateString(item.dueDate) == selectedDateString }
+    val tasksForSelectedDate = allTasks.filter { item -> item.dueDate != null && formatMillisToDateString(item.dueDate) == selectedDateString }
 
     LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
         item { DatePicker(state = datePickerState, modifier = Modifier.fillMaxWidth(), title = null, headline = null, showModeToggle = false) }
-
         if (upcomingTasks.isNotEmpty()) {
             item {
                 Text("Hızlı Erişim: Tarihli Görevler", modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(upcomingTasks) { task ->
-                        Card(
-                            modifier = Modifier.clickable { datePickerState.selectedDateMillis = task.dueDate },
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
-                        ) {
-                            Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text("📅", modifier = Modifier.padding(end = 4.dp))
-                                Text(text = task.title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSecondaryContainer)
-                            }
-                        }
-                    }
+                    items(upcomingTasks) { task -> Card(modifier = Modifier.clickable { datePickerState.selectedDateMillis = task.dueDate }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) { Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text("📅", modifier = Modifier.padding(end = 4.dp)); Text(text = task.title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSecondaryContainer) } } }
                 }
                 HorizontalDivider(modifier = Modifier.padding(top = 16.dp), thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant)
             }
         }
-
         item { Text(text = if (datePickerState.selectedDateMillis == null) "Tarih Seçin" else "$selectedDateString Görevleri", modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp), style = MaterialTheme.typography.titleMedium) }
-
-        items(tasksForSelectedDate, key = { it.id }) { item ->
-            Box(modifier = Modifier.padding(horizontal = 16.dp)) {
-                TodoItemRow(
-                    item = item,
-                    categories = categories, // Kategorileri karta yolluyoruz
-                    onCheckedChange = { isChecked -> scope.launch { dao.update(item.copy(isDone = isChecked)) } },
-                    onDeleteClick = { scope.launch { dao.delete(item) } },
-                    onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } }
-                )
-            }
-        }
+        items(tasksForSelectedDate, key = { it.id }) { item -> Box(modifier = Modifier.padding(horizontal = 16.dp)) { TodoItemRow(item = item, categories = categories, onCheckedChange = { isChecked -> scope.launch { dao.update(item.copy(isDone = isChecked)) } }, onDeleteClick = { scope.launch { dao.delete(item) } }, onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } }) } }
     }
 }
 
-// --- 8. GÖREV KARTI (KATEGORİ ROZETİ EKLENDİ) ---
+// --- 8. GÖREV KARTI (ZİL İKONU EKLENDİ) ---
 @Composable
-fun TodoItemRow(
-    item: TodoItem,
-    categories: List<Category>, // YENİ: Kart artık kategorileri biliyor
-    onCheckedChange: (Boolean) -> Unit,
-    onDeleteClick: () -> Unit,
-    onTaskUpdate: (TodoItem) -> Unit
-) {
+fun TodoItemRow(item: TodoItem, categories: List<Category>, onCheckedChange: (Boolean) -> Unit, onDeleteClick: () -> Unit, onTaskUpdate: (TodoItem) -> Unit) {
     var expanded by remember(item.id) { mutableStateOf(false) }
     var currentNotes by remember(item.id, item.notes) { mutableStateOf(item.notes) }
-
-    // Görevin ait olduğu kategoriyi bul (Eğer atandıysa)
     val taskCategory = categories.find { it.id == item.categoryId }
 
-    Card(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { expanded = !expanded }.animateContentSize(),
-        elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 6.dp else 2.dp)
-    ) {
+    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { expanded = !expanded }.animateContentSize(), elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 6.dp else 2.dp)) {
         Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = item.isDone, onCheckedChange = onCheckedChange)
                 Column(modifier = Modifier.weight(1f)) {
                     Text(text = item.title, style = MaterialTheme.typography.titleMedium, textDecoration = if (item.isDone) TextDecoration.LineThrough else TextDecoration.None)
 
-                    // YENİ: Kategori Rozeti (Badge)
                     if (taskCategory != null) {
-                        Surface(
-                            color = Color(taskCategory.colorCode).copy(alpha = 0.2f),
-                            shape = MaterialTheme.shapes.small,
-                            modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
-                        ) {
-                            Text(
-                                text = taskCategory.name,
-                                color = Color(taskCategory.colorCode),
-                                style = MaterialTheme.typography.labelSmall,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                            )
+                        Surface(color = Color(taskCategory.colorCode).copy(alpha = 0.2f), shape = MaterialTheme.shapes.small, modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)) {
+                            Text(text = taskCategory.name, color = Color(taskCategory.colorCode), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                         }
                     }
 
                     if (item.dueDate != null) {
                         val remainingTimeText = calculateRemainingTime(item.dueDate, item.dueTime)
                         val timeStr = if (item.dueTime != null) " - ${item.dueTime}" else ""
+                        // YENİ: Alarm kurulduysa tarih yazısının yanına zil ikonu ekle
+                        val bellIcon = if (item.hasReminder) " 🔔" else ""
 
-                        Text(text = "📅 ${formatMillisToDateString(item.dueDate)}$timeStr", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        if (!item.isDone && remainingTimeText != null) {
-                            Text(text = "⏳ $remainingTimeText", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                        }
+                        Text(text = "📅 ${formatMillisToDateString(item.dueDate)}$timeStr$bellIcon", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (!item.isDone && remainingTimeText != null) { Text(text = "⏳ $remainingTimeText", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
                     }
                 }
 
                 if (item.priority != null) {
-                    Row {
-                        for (i in 1..item.priority) { Icon(Icons.Filled.Star, contentDescription = null, tint = Color(0xFFFFC107), modifier = Modifier.size(16.dp)) }
-                    }
+                    Row { for (i in 1..item.priority) { Icon(Icons.Filled.Star, contentDescription = null, tint = Color(0xFFFFC107), modifier = Modifier.size(16.dp)) } }
                 }
 
                 IconButton(onClick = onDeleteClick) { Icon(Icons.Default.Delete, contentDescription = "Sil", tint = MaterialTheme.colorScheme.error) }
