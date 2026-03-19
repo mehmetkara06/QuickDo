@@ -1,4 +1,4 @@
-package com.example.to_do_list // Kendi paket adını kontrol etmeyi unutma!
+package com.example.to_do_list // Kendi paket adını kontrol et!
 
 import android.app.AlarmManager
 import android.app.PendingIntent
@@ -43,42 +43,46 @@ import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 
-// --- YARDIMCI FONKSİYONLAR ---
+// --- YARDIMCI FONKSİYON 1: Tarihi Formatla ---
 fun formatMillisToDateString(millis: Long?): String {
-    if (millis == null) return "Tarih Yok"
+    if (millis == null) return "Her Gün"
     val formatter = SimpleDateFormat("dd MMM yyyy", Locale("tr"))
     formatter.timeZone = TimeZone.getTimeZone("UTC")
     return formatter.format(Date(millis))
 }
 
-// --- GÜNCELLENMİŞ YARDIMCI FONKSİYON 2: Kalan Zamanı Hesapla ---
+// --- YARDIMCI FONKSİYON 2: KALAN ZAMAN ---
 fun calculateRemainingTime(dueDateMillis: Long?, dueTimeString: String?): String? {
-    if (dueDateMillis == null) return null
-
+    if (dueDateMillis == null && dueTimeString == null) return null
     val currentMillis = System.currentTimeMillis()
     val targetCalendar = Calendar.getInstance()
 
-    // Tarihi milisaniye olarak takvime oturtuyoruz
-    targetCalendar.timeInMillis = dueDateMillis
-
-    if (dueTimeString != null) {
+    if (dueDateMillis != null) {
+        targetCalendar.timeInMillis = dueDateMillis
+        if (dueTimeString != null) {
+            val parts = dueTimeString.split(":")
+            if (parts.size == 2) {
+                targetCalendar.set(Calendar.HOUR_OF_DAY, parts[0].toInt())
+                targetCalendar.set(Calendar.MINUTE, parts[1].toInt())
+                targetCalendar.set(Calendar.SECOND, 0)
+            }
+        } else {
+            targetCalendar.set(Calendar.HOUR_OF_DAY, 23); targetCalendar.set(Calendar.MINUTE, 59); targetCalendar.set(Calendar.SECOND, 59)
+        }
+    } else if (dueTimeString != null) {
         val parts = dueTimeString.split(":")
         if (parts.size == 2) {
             targetCalendar.set(Calendar.HOUR_OF_DAY, parts[0].toInt())
             targetCalendar.set(Calendar.MINUTE, parts[1].toInt())
-            targetCalendar.set(Calendar.SECOND, 0) // Saniyeyi sıfırladık
-            // -3 SAAT ÇIKARMA İŞLEMİNİ BURADAN DA SİLDİK!
+            targetCalendar.set(Calendar.SECOND, 0)
+            if (targetCalendar.timeInMillis <= currentMillis) {
+                targetCalendar.add(Calendar.DAY_OF_YEAR, 1)
+            }
         }
-    } else {
-        targetCalendar.set(Calendar.HOUR_OF_DAY, 23)
-        targetCalendar.set(Calendar.MINUTE, 59)
-        targetCalendar.set(Calendar.SECOND, 59)
     }
 
     val diff = targetCalendar.timeInMillis - currentMillis
-
-    // Eğer fark eksiyse (yani zaman geçmişse) Süresi doldu yaz
-    if (diff < 0) return "Süresi doldu!"
+    if (diff < 0 && dueDateMillis != null) return "Süresi doldu!"
 
     val days = TimeUnit.MILLISECONDS.toDays(diff)
     val hours = TimeUnit.MILLISECONDS.toHours(diff) % 24
@@ -90,41 +94,67 @@ fun calculateRemainingTime(dueDateMillis: Long?, dueTimeString: String?): String
         else -> "$minutes dk kaldı"
     }
 }
-// --- GÜNCELLENMİŞ ALARM KURUCU FONKSİYON ---
+
+// --- YARDIMCI FONKSİYON 3: ALARM KURUCU ---
 fun scheduleNotification(context: Context, taskId: Int, title: String, notes: String, dueDateMillis: Long?, dueTimeString: String?, priority: Int?) {
-    if (dueDateMillis == null) return
+    if (dueDateMillis == null && dueTimeString == null) return
     val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    val isRecurring = (dueDateMillis == null && dueTimeString != null)
+
     val intent = Intent(context, NotificationReceiver::class.java).apply {
         putExtra("taskId", taskId)
         putExtra("title", title)
         putExtra("message", notes.ifBlank { "Zamanı geldi!" })
         putExtra("priority", priority ?: 3)
+        putExtra("isRecurring", isRecurring)
+        putExtra("dueTimeString", dueTimeString)
     }
     val pendingIntent = PendingIntent.getBroadcast(context, taskId, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
 
-    val targetCalendar = Calendar.getInstance().apply { timeInMillis = dueDateMillis }
-    if (dueTimeString != null) {
+    val targetCalendar = Calendar.getInstance()
+
+    if (isRecurring && dueTimeString != null) {
         val parts = dueTimeString.split(":")
         if (parts.size == 2) {
             targetCalendar.set(Calendar.HOUR_OF_DAY, parts[0].toInt())
             targetCalendar.set(Calendar.MINUTE, parts[1].toInt())
-            targetCalendar.set(Calendar.SECOND, 0) // Saniyeyi sıfırladık
-            // -3 ÇIKARMA İŞLEMİ BURADAN SİLİNDİ!
+            targetCalendar.set(Calendar.SECOND, 0)
+            if (targetCalendar.timeInMillis <= System.currentTimeMillis()) {
+                targetCalendar.add(Calendar.DAY_OF_YEAR, 1)
+            }
         }
-    } else {
-        targetCalendar.set(Calendar.HOUR_OF_DAY, 9)
-        targetCalendar.set(Calendar.MINUTE, 0)
-        targetCalendar.set(Calendar.SECOND, 0)
+    } else if (dueDateMillis != null) {
+        targetCalendar.timeInMillis = dueDateMillis
+        if (dueTimeString != null) {
+            val parts = dueTimeString.split(":")
+            if (parts.size == 2) { targetCalendar.set(Calendar.HOUR_OF_DAY, parts[0].toInt()); targetCalendar.set(Calendar.MINUTE, parts[1].toInt()); targetCalendar.set(Calendar.SECOND, 0) }
+        } else {
+            targetCalendar.set(Calendar.HOUR_OF_DAY, 9); targetCalendar.set(Calendar.MINUTE, 0); targetCalendar.set(Calendar.SECOND, 0)
+        }
     }
 
-    // Eğer saat geçmişse alarm kurma (Zaman yolculuğu yapamayız)
-    if (targetCalendar.timeInMillis <= System.currentTimeMillis()) return
+    if (!isRecurring && targetCalendar.timeInMillis <= System.currentTimeMillis()) return
 
     try {
         alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, targetCalendar.timeInMillis, pendingIntent)
     } catch (e: SecurityException) {
         alarmManager.set(AlarmManager.RTC_WAKEUP, targetCalendar.timeInMillis, pendingIntent)
     }
+}
+
+// YENİ YARDIMCI FONKSİYON 4: ALARMI İPTAL ET (Bomba İmha Uzmanı)
+fun cancelNotification(context: Context, taskId: Int) {
+    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    val intent = Intent(context, NotificationReceiver::class.java)
+    // Orijinal alarmın aynısını taklit edip (taskId ile) onu buluyoruz
+    val pendingIntent = PendingIntent.getBroadcast(
+        context,
+        taskId,
+        intent,
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+    // Ve iptal ediyoruz!
+    alarmManager.cancel(pendingIntent)
 }
 
 @Composable
@@ -140,7 +170,7 @@ data class Category(@PrimaryKey(autoGenerate = true) val id: Int = 0, val name: 
 data class TodoItem(
     @PrimaryKey(autoGenerate = true) val id: Int = 0, val title: String, val isDone: Boolean = false, val dueDate: Long? = null,
     val notes: String = "", val dueTime: String? = null, val priority: Int? = null, val categoryId: Int? = null,
-    val hasReminder: Boolean = false // YENİ: İsteğe Bağlı Alarm Hafızası
+    val hasReminder: Boolean = false
 )
 
 // --- 2. VERİTABANI SORGULARI ---
@@ -149,7 +179,7 @@ interface TodoDao {
     @Query("SELECT * FROM todo_table ORDER BY isDone ASC, priority DESC, id DESC")
     fun getAll(): Flow<List<TodoItem>>
 
-    @Insert suspend fun insert(item: TodoItem): Long // YENİ: ID döndürüyor
+    @Insert suspend fun insert(item: TodoItem): Long
     @Delete suspend fun delete(item: TodoItem)
     @Update suspend fun update(item: TodoItem)
 
@@ -205,24 +235,14 @@ fun MainAppScaffold(dao: TodoDao) {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Text("Sıralama Ölçütü", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     SortType.values().forEach { sortType ->
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { currentSortType = sortType }.padding(vertical = 4.dp)) {
-                            RadioButton(selected = currentSortType == sortType, onClick = { currentSortType = sortType })
-                            Text(text = sortType.label, modifier = Modifier.padding(start = 8.dp))
-                        }
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { currentSortType = sortType }.padding(vertical = 4.dp)) { RadioButton(selected = currentSortType == sortType, onClick = { currentSortType = sortType }); Text(text = sortType.label, modifier = Modifier.padding(start = 8.dp)) }
                     }
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     Text("Kategori Filtresi", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     Spacer(modifier = Modifier.height(8.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { currentCategoryFilter = null }.padding(vertical = 4.dp)) {
-                        RadioButton(selected = currentCategoryFilter == null, onClick = { currentCategoryFilter = null })
-                        Text("Tüm Kategoriler", modifier = Modifier.padding(start = 8.dp))
-                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { currentCategoryFilter = null }.padding(vertical = 4.dp)) { RadioButton(selected = currentCategoryFilter == null, onClick = { currentCategoryFilter = null }); Text("Tüm Kategoriler", modifier = Modifier.padding(start = 8.dp)) }
                     categories.forEach { cat ->
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { currentCategoryFilter = cat }.padding(vertical = 4.dp)) {
-                            RadioButton(selected = currentCategoryFilter == cat, onClick = { currentCategoryFilter = cat })
-                            Box(modifier = Modifier.padding(start = 8.dp).size(12.dp).background(Color(cat.colorCode), CircleShape))
-                            Text(cat.name, modifier = Modifier.padding(start = 8.dp))
-                        }
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { currentCategoryFilter = cat }.padding(vertical = 4.dp)) { RadioButton(selected = currentCategoryFilter == cat, onClick = { currentCategoryFilter = cat }); Box(modifier = Modifier.padding(start = 8.dp).size(12.dp).background(Color(cat.colorCode), CircleShape)); Text(cat.name, modifier = Modifier.padding(start = 8.dp)) }
                     }
                 }
             },
@@ -264,18 +284,16 @@ fun MainAppScaffold(dao: TodoDao) {
     }
 }
 
-// --- 5. GÖREV EKLEME EKRANI (İSTEĞE BAĞLI ALARM EKLENDİ) ---
+// --- 5. GÖREV EKLEME EKRANI ---
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
-    val context = LocalContext.current // Alarm kurmak için gerekli
+    val context = LocalContext.current
     var text by remember { mutableStateOf("") }
     var notesText by remember { mutableStateOf("") }
     var selectedDate by remember { mutableStateOf<Long?>(null) }
     var selectedTime by remember { mutableStateOf<String?>(null) }
     var selectedPriority by remember { mutableStateOf<Int?>(null) }
-
-    // YENİ: Hatırlatıcı Açık/Kapalı Durumu
     var hasReminder by remember { mutableStateOf(false) }
 
     val categories by dao.getAllCategories().collectAsState(initial = emptyList())
@@ -302,15 +320,10 @@ fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
                     Spacer(modifier = Modifier.height(16.dp))
                     Text("Renk Seçin:", style = MaterialTheme.typography.labelMedium)
                     Spacer(modifier = Modifier.height(8.dp))
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(colorPalette) { colorCode ->
-                            Box(modifier = Modifier.size(36.dp).background(Color(colorCode), CircleShape).border(if (selectedColorCode == colorCode) 3.dp else 0.dp, Color.Black.copy(alpha = 0.5f), CircleShape).clickable { selectedColorCode = colorCode })
-                        }
-                    }
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) { items(colorPalette) { colorCode -> Box(modifier = Modifier.size(36.dp).background(Color(colorCode), CircleShape).border(if (selectedColorCode == colorCode) 3.dp else 0.dp, Color.Black.copy(alpha = 0.5f), CircleShape).clickable { selectedColorCode = colorCode }) } }
                 }
             },
-            confirmButton = { TextButton(onClick = { if (newCatName.isNotBlank()) { scope.launch { dao.insertCategory(Category(name = newCatName, colorCode = selectedColorCode)); showNewCategoryDialog = false } } }) { Text("Oluştur") } },
-            dismissButton = { TextButton(onClick = { showNewCategoryDialog = false }) { Text("İptal") } }
+            confirmButton = { TextButton(onClick = { if (newCatName.isNotBlank()) { scope.launch { dao.insertCategory(Category(name = newCatName, colorCode = selectedColorCode)); showNewCategoryDialog = false } } }) { Text("Oluştur") } }, dismissButton = { TextButton(onClick = { showNewCategoryDialog = false }) { Text("İptal") } }
         )
     }
 
@@ -346,12 +359,7 @@ fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // YENİ: İsteğe Bağlı Hatırlatıcı Seçeneği (Switch)
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
+        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Notifications, contentDescription = null, tint = if (hasReminder) MaterialTheme.colorScheme.primary else Color.Gray)
                 Spacer(modifier = Modifier.width(8.dp))
@@ -367,16 +375,12 @@ fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
             Button(onClick = {
                 if (text.isNotBlank()) {
                     scope.launch {
-                        // 1. Görevi oluştur (hasReminder bilgisiyle)
                         val newItem = TodoItem(title = text, dueDate = selectedDate, dueTime = selectedTime, priority = selectedPriority, notes = notesText, categoryId = selectedCategory?.id, hasReminder = hasReminder)
-                        // 2. Veritabanına kaydet ve yeni ID'yi yakala
                         val insertedId = dao.insert(newItem).toInt()
 
-                        // 3. EĞER kullanıcı "Bana Hatırlat" dediyse ve tarih seçtiyse Alarmı Kur!
-                        if (hasReminder && selectedDate != null) {
+                        if (hasReminder && (selectedDate != null || selectedTime != null)) {
                             scheduleNotification(context, insertedId, text, notesText, selectedDate, selectedTime, selectedPriority)
                         }
-
                         onNavigateBack()
                     }
                 }
@@ -389,23 +393,33 @@ fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
 @Composable
 fun TaskListScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<Category>, sortType: SortType, filterCategory: Category?) {
     val scope = rememberCoroutineScope()
-    var displayItems = if (filterCategory == null) allTasks else allTasks.filter { it.categoryId == filterCategory.id }
-    displayItems = when(sortType) {
-        SortType.DEFAULT -> displayItems
-        SortType.DATE_ASC -> displayItems.sortedWith(compareBy({ it.isDone }, { it.dueDate ?: Long.MAX_VALUE }))
-        SortType.DATE_DESC -> displayItems.sortedWith(compareBy({ it.isDone }, { -(it.dueDate ?: 0L) }))
-        SortType.PRIORITY -> displayItems.sortedWith(compareBy({ it.isDone }, { -(it.priority ?: 0) }))
-    }
+    val context = LocalContext.current // YENİ: İptal için Context eklendi
 
-    if (displayItems.isEmpty()) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (filterCategory == null) "Görev yok. Sağ alttaki + butonuna tıkla!" else "Bu kriterlere uygun görev bulunamadı.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-    } else {
-        LazyColumn(contentPadding = PaddingValues(16.dp)) {
-            items(displayItems, key = { it.id }) { item ->
-                TodoItemRow(item = item, categories = categories, onCheckedChange = { isChecked -> scope.launch { dao.update(item.copy(isDone = isChecked)) } }, onDeleteClick = { scope.launch { dao.delete(item) } }, onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } })
-            }
-        }
-    }
+    var displayItems = if (filterCategory == null) allTasks else allTasks.filter { it.categoryId == filterCategory.id }
+    displayItems = when(sortType) { SortType.DEFAULT -> displayItems; SortType.DATE_ASC -> displayItems.sortedWith(compareBy({ it.isDone }, { it.dueDate ?: Long.MAX_VALUE })); SortType.DATE_DESC -> displayItems.sortedWith(compareBy({ it.isDone }, { -(it.dueDate ?: 0L) })); SortType.PRIORITY -> displayItems.sortedWith(compareBy({ it.isDone }, { -(it.priority ?: 0) })) }
+
+    if (displayItems.isEmpty()) { Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (filterCategory == null) "Görev yok. Sağ alttaki + butonuna tıkla!" else "Bu kriterlere uygun görev bulunamadı.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    } else { LazyColumn(contentPadding = PaddingValues(16.dp)) { items(displayItems, key = { it.id }) { item ->
+        TodoItemRow(
+            item = item,
+            categories = categories,
+            onCheckedChange = { isChecked ->
+                scope.launch {
+                    dao.update(item.copy(isDone = isChecked))
+                    // YENİ: Tik atılırsa Alarmı İptal Et, Tik kaldırılırsa Yeniden Kur
+                    if (isChecked) cancelNotification(context, item.id)
+                    else if (item.hasReminder) scheduleNotification(context, item.id, item.title, item.notes, item.dueDate, item.dueTime, item.priority)
+                }
+            },
+            onDeleteClick = {
+                scope.launch {
+                    dao.delete(item)
+                    // YENİ: Görev Silinirse Alarmı İptal Et
+                    cancelNotification(context, item.id)
+                }
+            },
+            onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } }
+        ) } } }
 }
 
 // --- 7. TAKVİM EKRANI ---
@@ -414,6 +428,8 @@ fun TaskListScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<Cate
 fun CalendarViewScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<Category>) {
     val datePickerState = rememberDatePickerState()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current // YENİ: İptal için Context eklendi
+
     val upcomingTasks = allTasks.filter { it.dueDate != null }.sortedBy { it.dueDate }
     val selectedDateString = formatMillisToDateString(datePickerState.selectedDateMillis)
     val tasksForSelectedDate = allTasks.filter { item -> item.dueDate != null && formatMillisToDateString(item.dueDate) == selectedDateString }
@@ -421,20 +437,35 @@ fun CalendarViewScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<
     LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
         item { DatePicker(state = datePickerState, modifier = Modifier.fillMaxWidth(), title = null, headline = null, showModeToggle = false) }
         if (upcomingTasks.isNotEmpty()) {
-            item {
-                Text("Hızlı Erişim: Tarihli Görevler", modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(upcomingTasks) { task -> Card(modifier = Modifier.clickable { datePickerState.selectedDateMillis = task.dueDate }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) { Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text("📅", modifier = Modifier.padding(end = 4.dp)); Text(text = task.title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSecondaryContainer) } } }
-                }
+            item { Text("Hızlı Erişim: Tarihli Görevler", modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { items(upcomingTasks) { task -> Card(modifier = Modifier.clickable { datePickerState.selectedDateMillis = task.dueDate }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) { Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text("📅", modifier = Modifier.padding(end = 4.dp)); Text(text = task.title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSecondaryContainer) } } } }
                 HorizontalDivider(modifier = Modifier.padding(top = 16.dp), thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant)
             }
         }
         item { Text(text = if (datePickerState.selectedDateMillis == null) "Tarih Seçin" else "$selectedDateString Görevleri", modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp), style = MaterialTheme.typography.titleMedium) }
-        items(tasksForSelectedDate, key = { it.id }) { item -> Box(modifier = Modifier.padding(horizontal = 16.dp)) { TodoItemRow(item = item, categories = categories, onCheckedChange = { isChecked -> scope.launch { dao.update(item.copy(isDone = isChecked)) } }, onDeleteClick = { scope.launch { dao.delete(item) } }, onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } }) } }
+        items(tasksForSelectedDate, key = { it.id }) { item -> Box(modifier = Modifier.padding(horizontal = 16.dp)) {
+            TodoItemRow(
+                item = item,
+                categories = categories,
+                onCheckedChange = { isChecked ->
+                    scope.launch {
+                        dao.update(item.copy(isDone = isChecked))
+                        if (isChecked) cancelNotification(context, item.id)
+                        else if (item.hasReminder) scheduleNotification(context, item.id, item.title, item.notes, item.dueDate, item.dueTime, item.priority)
+                    }
+                },
+                onDeleteClick = {
+                    scope.launch {
+                        dao.delete(item)
+                        cancelNotification(context, item.id)
+                    }
+                },
+                onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } }
+            ) } }
     }
 }
 
-// --- 8. GÖREV KARTI (ZİL İKONU EKLENDİ) ---
+// --- 8. GÖREV KARTI ---
 @Composable
 fun TodoItemRow(item: TodoItem, categories: List<Category>, onCheckedChange: (Boolean) -> Unit, onDeleteClick: () -> Unit, onTaskUpdate: (TodoItem) -> Unit) {
     var expanded by remember(item.id) { mutableStateOf(false) }
@@ -447,31 +478,21 @@ fun TodoItemRow(item: TodoItem, categories: List<Category>, onCheckedChange: (Bo
                 Checkbox(checked = item.isDone, onCheckedChange = onCheckedChange)
                 Column(modifier = Modifier.weight(1f)) {
                     Text(text = item.title, style = MaterialTheme.typography.titleMedium, textDecoration = if (item.isDone) TextDecoration.LineThrough else TextDecoration.None)
+                    if (taskCategory != null) { Surface(color = Color(taskCategory.colorCode).copy(alpha = 0.2f), shape = MaterialTheme.shapes.small, modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)) { Text(text = taskCategory.name, color = Color(taskCategory.colorCode), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) } }
 
-                    if (taskCategory != null) {
-                        Surface(color = Color(taskCategory.colorCode).copy(alpha = 0.2f), shape = MaterialTheme.shapes.small, modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)) {
-                            Text(text = taskCategory.name, color = Color(taskCategory.colorCode), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                        }
-                    }
-
-                    if (item.dueDate != null) {
+                    if (item.dueDate != null || item.dueTime != null) {
                         val remainingTimeText = calculateRemainingTime(item.dueDate, item.dueTime)
+                        val dateStr = if (item.dueDate != null) formatMillisToDateString(item.dueDate) else "Her Gün"
                         val timeStr = if (item.dueTime != null) " - ${item.dueTime}" else ""
-                        // YENİ: Alarm kurulduysa tarih yazısının yanına zil ikonu ekle
                         val bellIcon = if (item.hasReminder) " 🔔" else ""
 
-                        Text(text = "📅 ${formatMillisToDateString(item.dueDate)}$timeStr$bellIcon", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(text = "📅 $dateStr$timeStr$bellIcon", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         if (!item.isDone && remainingTimeText != null) { Text(text = "⏳ $remainingTimeText", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
                     }
                 }
-
-                if (item.priority != null) {
-                    Row { for (i in 1..item.priority) { Icon(Icons.Filled.Star, contentDescription = null, tint = Color(0xFFFFC107), modifier = Modifier.size(16.dp)) } }
-                }
-
+                if (item.priority != null) { Row { for (i in 1..item.priority) { Icon(Icons.Filled.Star, contentDescription = null, tint = Color(0xFFFFC107), modifier = Modifier.size(16.dp)) } } }
                 IconButton(onClick = onDeleteClick) { Icon(Icons.Default.Delete, contentDescription = "Sil", tint = MaterialTheme.colorScheme.error) }
             }
-
             if (expanded) {
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                 OutlinedTextField(value = currentNotes, onValueChange = { currentNotes = it }, label = { Text("Görev Detayları / Notlar") }, modifier = Modifier.fillMaxWidth(), minLines = 2)
