@@ -14,26 +14,82 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.room.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.TimeUnit
 
-// --- YARDIMCI FONKSİYON ---
+// --- YARDIMCI FONKSİYON 1: Tarihi Metne Çevir ---
 fun formatMillisToDateString(millis: Long?): String {
     if (millis == null) return "Tarih Yok"
     val formatter = SimpleDateFormat("dd MMM yyyy", Locale("tr"))
     formatter.timeZone = TimeZone.getTimeZone("UTC")
     return formatter.format(Date(millis))
+}
+
+// --- YARDIMCI FONKSİYON 2: Kalan Zamanı Hesapla ---
+fun calculateRemainingTime(dueDateMillis: Long?, dueTimeString: String?): String? {
+    if (dueDateMillis == null) return null
+
+    val currentMillis = System.currentTimeMillis()
+    val targetCalendar = Calendar.getInstance().apply { timeInMillis = dueDateMillis }
+
+    if (dueTimeString != null) {
+        val parts = dueTimeString.split(":")
+        if (parts.size == 2) {
+            targetCalendar.set(Calendar.HOUR_OF_DAY, parts[0].toInt())
+            targetCalendar.set(Calendar.MINUTE, parts[1].toInt())
+            targetCalendar.add(Calendar.HOUR_OF_DAY, -3) // UTC düzeltmesi (Türkiye saati için)
+        }
+    } else {
+        targetCalendar.set(Calendar.HOUR_OF_DAY, 23)
+        targetCalendar.set(Calendar.MINUTE, 59)
+    }
+
+    val diff = targetCalendar.timeInMillis - currentMillis
+    if (diff < 0) return "Süresi doldu!"
+
+    val days = TimeUnit.MILLISECONDS.toDays(diff)
+    val hours = TimeUnit.MILLISECONDS.toHours(diff) % 24
+    val minutes = TimeUnit.MILLISECONDS.toMinutes(diff) % 60
+
+    return when {
+        days > 0 -> "$days gün, $hours saat kaldı"
+        hours > 0 -> "$hours saat, $minutes dk kaldı"
+        else -> "$minutes dk kaldı"
+    }
+}
+
+// --- YARDIMCI BİLEŞEN: Saat Seçici Diyalog ---
+@Composable
+fun TimePickerDialog(
+    onDismissRequest: () -> Unit,
+    confirmButton: @Composable () -> Unit,
+    dismissButton: @Composable () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismissRequest,
+        modifier = Modifier.fillMaxWidth(),
+        title = { Text("Saat Seçin") },
+        text = { content() },
+        confirmButton = confirmButton,
+        dismissButton = dismissButton
+    )
 }
 
 // --- 1. VERİ MODELİ (Entity) ---
@@ -43,13 +99,16 @@ data class TodoItem(
     val title: String,
     val isDone: Boolean = false,
     val dueDate: Long? = null,
-    val notes: String = "" // YENİ: Görev notlarını tutacağımız sütun
+    val notes: String = "",
+    val dueTime: String? = null, // YENİ: Saat
+    val priority: Int? = null    // YENİ: Yıldız derecesi
 )
 
 // --- 2. VERİTABANI SORGULARI (DAO) ---
 @Dao
 interface TodoDao {
-    @Query("SELECT * FROM todo_table ORDER BY id DESC")
+    // YENİ: Yapılmayanlar ve yüksek öncelikliler önce gelir
+    @Query("SELECT * FROM todo_table ORDER BY isDone ASC, priority DESC, id DESC")
     fun getAll(): Flow<List<TodoItem>>
 
     @Insert
@@ -101,7 +160,7 @@ fun MainAppScaffold(dao: TodoDao) {
                 title = {
                     Text(
                         when(currentScreen) {
-                            AppScreen.TASKS -> "Görev Yöneticisi"
+                            AppScreen.TASKS -> "QuickDo"
                             AppScreen.CALENDAR -> "Takvim"
                             AppScreen.ADD_TASK -> "Yeni Görev Ekle"
                         }
@@ -143,61 +202,82 @@ fun MainAppScaffold(dao: TodoDao) {
     }
 }
 
-// --- 7. GÖREV EKLEME EKRANI ---
+// --- 7. GÖREV EKLEME EKRANI (YENİLENMİŞ) ---
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
     var text by remember { mutableStateOf("") }
-    var notesText by remember { mutableStateOf("") } // YENİ: Ekleme anında not yazabilme
+    var notesText by remember { mutableStateOf("") }
+
     var selectedDate by remember { mutableStateOf<Long?>(null) }
+    var selectedTime by remember { mutableStateOf<String?>(null) }
+    var selectedPriority by remember { mutableStateOf<Int?>(null) }
+
     var showDatePicker by remember { mutableStateOf(false) }
+    var showTimePicker by remember { mutableStateOf(false) }
+
     val scope = rememberCoroutineScope()
     val datePickerState = rememberDatePickerState()
+    val timePickerState = rememberTimePickerState(is24Hour = true)
 
     if (showDatePicker) {
         DatePickerDialog(
             onDismissRequest = { showDatePicker = false },
             confirmButton = {
+                TextButton(onClick = { selectedDate = datePickerState.selectedDateMillis; showDatePicker = false }) { Text("Tamam") }
+            },
+            dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("İptal") } }
+        ) { DatePicker(state = datePickerState) }
+    }
+
+    if (showTimePicker) {
+        TimePickerDialog(
+            onDismissRequest = { showTimePicker = false },
+            confirmButton = {
                 TextButton(onClick = {
-                    selectedDate = datePickerState.selectedDateMillis
-                    showDatePicker = false
+                    val hour = timePickerState.hour.toString().padStart(2, '0')
+                    val minute = timePickerState.minute.toString().padStart(2, '0')
+                    selectedTime = "$hour:$minute"
+                    showTimePicker = false
                 }) { Text("Tamam") }
             },
-            dismissButton = {
-                TextButton(onClick = { showDatePicker = false }) { Text("İptal") }
-            }
-        ) {
-            DatePicker(state = datePickerState)
-        }
+            dismissButton = { TextButton(onClick = { showTimePicker = false }) { Text("İptal") } }
+        ) { TimePicker(state = timePickerState, modifier = Modifier.fillMaxWidth()) }
     }
 
     Column(modifier = Modifier.padding(16.dp).fillMaxSize()) {
-        OutlinedTextField(
-            value = text,
-            onValueChange = { text = it },
-            label = { Text("Ne yapılması gerekiyor?") },
-            modifier = Modifier.fillMaxWidth()
-        )
+        OutlinedTextField(value = text, onValueChange = { text = it }, label = { Text("Ne yapılması gerekiyor?") }, modifier = Modifier.fillMaxWidth())
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedTextField(value = notesText, onValueChange = { notesText = it }, label = { Text("Notlar (İsteğe bağlı)") }, modifier = Modifier.fillMaxWidth(), minLines = 2)
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Yıldız Seçimi
+        Text("Önem Derecesi (İsteğe Bağlı):", style = MaterialTheme.typography.bodyMedium)
+        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.Center) {
+            for (i in 1..5) {
+                IconButton(onClick = { selectedPriority = if (selectedPriority == i) null else i }) {
+                    Icon(
+                        imageVector = if (selectedPriority != null && i <= selectedPriority!!) Icons.Filled.Star else Icons.Outlined.Star,
+                        contentDescription = "$i Yıldız",
+                        tint = if (selectedPriority != null && i <= selectedPriority!!) Color(0xFFFFC107) else Color.Gray,
+                        modifier = Modifier.size(36.dp)
+                    )
+                }
+            }
+        }
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        OutlinedTextField(
-            value = notesText,
-            onValueChange = { notesText = it },
-            label = { Text("Notlar (İsteğe bağlı)") },
-            modifier = Modifier.fillMaxWidth(),
-            minLines = 3 // Not alanı biraz daha geniş başlasın
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        OutlinedButton(
-            onClick = { showDatePicker = true },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Icon(Icons.Default.DateRange, contentDescription = null)
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(if (selectedDate == null) "Tarih Ekle (İsteğe Bağlı)" else "Tarih: ${formatMillisToDateString(selectedDate)}")
+        // Tarih ve Saat Seçimi
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { showDatePicker = true }, modifier = Modifier.weight(1f)) {
+                Icon(Icons.Default.DateRange, contentDescription = null)
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(if (selectedDate == null) "Tarih Ekle" else formatMillisToDateString(selectedDate))
+            }
+            OutlinedButton(onClick = { showTimePicker = true }, modifier = Modifier.weight(1f)) {
+                Text(selectedTime ?: "Saat Ekle")
+            }
         }
 
         Spacer(modifier = Modifier.weight(1f))
@@ -207,7 +287,7 @@ fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
             Button(onClick = {
                 if (text.isNotBlank()) {
                     scope.launch {
-                        dao.insert(TodoItem(title = text, dueDate = selectedDate, notes = notesText))
+                        dao.insert(TodoItem(title = text, dueDate = selectedDate, dueTime = selectedTime, priority = selectedPriority, notes = notesText))
                         onNavigateBack()
                     }
                 }
@@ -224,12 +304,10 @@ fun TaskListScreen(dao: TodoDao) {
 
     if (items.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("Henüz bir görev eklemedin. Sağ alttaki + butonuna tıkla!", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Görev yok. Sağ alttaki + butonuna tıkla!", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     } else {
         LazyColumn(contentPadding = PaddingValues(16.dp)) {
-            // YENİ MÜHENDİSLİK ÇÖZÜMÜ: key = { it.id }
-            // Android'e "Her kartın kimliği var, hafızaları birbirine karıştırma" emrini verdik.
             items(items, key = { it.id }) { item ->
                 TodoItemRow(
                     item = item,
@@ -242,7 +320,7 @@ fun TaskListScreen(dao: TodoDao) {
     }
 }
 
-// --- 9. TAKVİM EKRANI (SIĞMAMA VE HAFIZA SORUNU ÇÖZÜLDÜ) ---
+// --- 9. TAKVİM EKRANI ---
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CalendarViewScreen(dao: TodoDao) {
@@ -256,23 +334,11 @@ fun CalendarViewScreen(dao: TodoDao) {
         item.dueDate != null && formatMillisToDateString(item.dueDate) == selectedDateString
     }
 
-    // Ekranın tamamı tek bir kaydırılabilir yapı (Sığmama sorunu çözümü)
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(bottom = 80.dp)
-    ) {
-        // 1. Takvim Bileşeni
+    LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
         item {
-            DatePicker(
-                state = datePickerState,
-                modifier = Modifier.fillMaxWidth(),
-                title = null,
-                headline = null,
-                showModeToggle = false
-            )
+            DatePicker(state = datePickerState, modifier = Modifier.fillMaxWidth(), title = null, headline = null, showModeToggle = false)
         }
 
-        // 2. Hızlı Erişim Yatay Şeridi
         if (upcomingTasks.isNotEmpty()) {
             item {
                 Text(
@@ -298,7 +364,6 @@ fun CalendarViewScreen(dao: TodoDao) {
             }
         }
 
-        // 3. Seçili Günün Başlığı
         item {
             Text(
                 text = if (datePickerState.selectedDateMillis == null) "Tarih Seçin" else "$selectedDateString Görevleri",
@@ -307,8 +372,6 @@ fun CalendarViewScreen(dao: TodoDao) {
             )
         }
 
-        // 4. Günün Görevleri Listesi
-        // YENİ MÜHENDİSLİK ÇÖZÜMÜ: key = { it.id } (Hafıza Hatasının Çözümü)
         items(tasksForSelectedDate, key = { it.id }) { item ->
             Box(modifier = Modifier.padding(horizontal = 16.dp)) {
                 TodoItemRow(
@@ -322,8 +385,7 @@ fun CalendarViewScreen(dao: TodoDao) {
     }
 }
 
-// --- 10. GÖREV KARTI (AÇILIR KAPANIR NOT DESTEĞİ) ---
-// --- 10. GÖREV KARTI (Hafıza Hatası Çözüldü) ---
+// --- 10. GÖREV KARTI (YENİLENMİŞ) ---
 @Composable
 fun TodoItemRow(
     item: TodoItem,
@@ -331,17 +393,11 @@ fun TodoItemRow(
     onDeleteClick: () -> Unit,
     onTaskUpdate: (TodoItem) -> Unit
 ) {
-    // MÜHENDİSLİK ÇÖZÜMÜ: remember içine (item.id) ekledik.
-    // Böylece farklı bir görev geldiğinde kart eski hafızasını sıfırlar!
     var expanded by remember(item.id) { mutableStateOf(false) }
     var currentNotes by remember(item.id, item.notes) { mutableStateOf(item.notes) }
 
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp)
-            .clickable { expanded = !expanded }
-            .animateContentSize(),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { expanded = !expanded }.animateContentSize(),
         elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 6.dp else 2.dp)
     ) {
         Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
@@ -350,16 +406,39 @@ fun TodoItemRow(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = item.title,
+                        style = MaterialTheme.typography.titleMedium,
                         textDecoration = if (item.isDone) TextDecoration.LineThrough else TextDecoration.None
                     )
+
+                    // Alt Bilgi: Tarih, Saat ve Kalan Zaman
                     if (item.dueDate != null) {
+                        val remainingTimeText = calculateRemainingTime(item.dueDate, item.dueTime)
+                        val timeStr = if (item.dueTime != null) " - ${item.dueTime}" else ""
+
                         Text(
-                            text = "📅 ${formatMillisToDateString(item.dueDate)}",
+                            text = "📅 ${formatMillisToDateString(item.dueDate)}$timeStr",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        if (!item.isDone && remainingTimeText != null) {
+                            Text(
+                                text = "⏳ $remainingTimeText",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
                     }
                 }
+
+                // Yıldız Gösterimi
+                if (item.priority != null) {
+                    Row {
+                        for (i in 1..item.priority) {
+                            Icon(Icons.Filled.Star, contentDescription = null, tint = Color(0xFFFFC107), modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+
                 IconButton(onClick = onDeleteClick) {
                     Icon(Icons.Default.Delete, contentDescription = "Sil", tint = MaterialTheme.colorScheme.error)
                 }
