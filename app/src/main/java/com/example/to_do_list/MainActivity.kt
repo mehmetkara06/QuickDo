@@ -465,33 +465,76 @@ fun CalendarViewScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<
     }
 }
 
-// --- 8. GÖREV KARTI ---
+// --- 8. GÖREV KARTI (SÜRESİ DOLANLAR VE TAMAMLANANLAR İÇİN GÖRSEL GÜNCELLEME) ---
 @Composable
 fun TodoItemRow(item: TodoItem, categories: List<Category>, onCheckedChange: (Boolean) -> Unit, onDeleteClick: () -> Unit, onTaskUpdate: (TodoItem) -> Unit) {
     var expanded by remember(item.id) { mutableStateOf(false) }
     var currentNotes by remember(item.id, item.notes) { mutableStateOf(item.notes) }
     val taskCategory = categories.find { it.id == item.categoryId }
 
-    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { expanded = !expanded }.animateContentSize(), elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 6.dp else 2.dp)) {
+    // MÜHENDİSLİK: Görevin zaman durumunu hesaplıyoruz
+    val remainingTimeText = calculateRemainingTime(item.dueDate, item.dueTime)
+    val isOverdue = !item.isDone && remainingTimeText == "Süresi doldu!"
+
+    // YENİ: Kartın Arka Plan Rengini Duruma Göre Belirle
+    val cardColor = when {
+        item.isDone -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f) // Yapıldıysa karart (Gri/Saydam)
+        isOverdue -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.8f)   // Geciktiyse hafif kırmızı (Uyarı Rengi)
+        else -> MaterialTheme.colorScheme.surface                                  // Normal görev rengi
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { expanded = !expanded }.animateContentSize(),
+        elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 6.dp else 2.dp),
+        colors = CardDefaults.cardColors(containerColor = cardColor) // YENİ: Rengi karta uyguladık
+    ) {
         Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = item.isDone, onCheckedChange = onCheckedChange)
+
+                // İçeriklerin şeffaflığını (Opacity) görev yapıldıysa düşürüyoruz
+                val contentAlpha = if (item.isDone) 0.5f else 1f
+
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(text = item.title, style = MaterialTheme.typography.titleMedium, textDecoration = if (item.isDone) TextDecoration.LineThrough else TextDecoration.None)
-                    if (taskCategory != null) { Surface(color = Color(taskCategory.colorCode).copy(alpha = 0.2f), shape = MaterialTheme.shapes.small, modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)) { Text(text = taskCategory.name, color = Color(taskCategory.colorCode), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) } }
+                    Text(
+                        text = item.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        textDecoration = if (item.isDone) TextDecoration.LineThrough else TextDecoration.None,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = contentAlpha)
+                    )
+
+                    if (taskCategory != null) {
+                        Surface(
+                            color = Color(taskCategory.colorCode).copy(alpha = if (item.isDone) 0.1f else 0.2f),
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
+                        ) {
+                            Text(text = taskCategory.name, color = Color(taskCategory.colorCode).copy(alpha = contentAlpha), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                        }
+                    }
 
                     if (item.dueDate != null || item.dueTime != null) {
-                        val remainingTimeText = calculateRemainingTime(item.dueDate, item.dueTime)
                         val dateStr = if (item.dueDate != null) formatMillisToDateString(item.dueDate) else "Her Gün"
                         val timeStr = if (item.dueTime != null) " - ${item.dueTime}" else ""
                         val bellIcon = if (item.hasReminder) " 🔔" else ""
 
-                        Text(text = "📅 $dateStr$timeStr$bellIcon", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        if (!item.isDone && remainingTimeText != null) { Text(text = "⏳ $remainingTimeText", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+                        Text(
+                            text = "📅 $dateStr$timeStr$bellIcon",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = contentAlpha)
+                        )
+
+                        if (isOverdue) {
+                            Text(text = "⏳ Süresi doldu!", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                        } else if (!item.isDone && remainingTimeText != null) {
+                            Text(text = "⏳ $remainingTimeText", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                        }
                     }
                 }
-                if (item.priority != null) { Row { for (i in 1..item.priority) { Icon(Icons.Filled.Star, contentDescription = null, tint = Color(0xFFFFC107), modifier = Modifier.size(16.dp)) } } }
-                IconButton(onClick = onDeleteClick) { Icon(Icons.Default.Delete, contentDescription = "Sil", tint = MaterialTheme.colorScheme.error) }
+                if (item.priority != null) {
+                    Row { for (i in 1..item.priority) { Icon(Icons.Filled.Star, contentDescription = null, tint = Color(0xFFFFC107).copy(alpha = contentAlpha), modifier = Modifier.size(16.dp)) } }
+                }
+                IconButton(onClick = onDeleteClick) { Icon(Icons.Default.Delete, contentDescription = "Sil", tint = MaterialTheme.colorScheme.error.copy(alpha = contentAlpha)) }
             }
             if (expanded) {
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
