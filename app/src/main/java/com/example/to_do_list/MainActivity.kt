@@ -42,6 +42,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
+import androidx.glance.appwidget.updateAll // Widget'ı güncellemek için gerekli
 
 // --- YARDIMCI FONKSİYON 1: Tarihi Formatla ---
 fun formatMillisToDateString(millis: Long?): String {
@@ -142,19 +143,26 @@ fun scheduleNotification(context: Context, taskId: Int, title: String, notes: St
     }
 }
 
-// YENİ YARDIMCI FONKSİYON 4: ALARMI İPTAL ET (Bomba İmha Uzmanı)
+// YARDIMCI FONKSİYON 4: ALARMI İPTAL ET
 fun cancelNotification(context: Context, taskId: Int) {
     val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
     val intent = Intent(context, NotificationReceiver::class.java)
-    // Orijinal alarmın aynısını taklit edip (taskId ile) onu buluyoruz
     val pendingIntent = PendingIntent.getBroadcast(
         context,
         taskId,
         intent,
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
     )
-    // Ve iptal ediyoruz!
     alarmManager.cancel(pendingIntent)
+}
+
+// YENİ YARDIMCI FONKSİYON 5: WIDGET'I ANINDA YENİLE (Gecikme Korumalı)
+fun refreshQuickDoWidget(context: Context) {
+    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+        // ÇÖZÜM BURADA: Veritabanının kaydı tam olarak bitirmesi için çeyrek saniye bekle!
+        kotlinx.coroutines.delay(300)
+        QuickDoWidget().updateAll(context)
+    }
 }
 
 @Composable
@@ -381,6 +389,10 @@ fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
                         if (hasReminder && (selectedDate != null || selectedTime != null)) {
                             scheduleNotification(context, insertedId, text, notesText, selectedDate, selectedTime, selectedPriority)
                         }
+
+                        // YENİ EKLENEN: Yeni görev eklendiğinde de widget yenilensin!
+                        refreshQuickDoWidget(context)
+
                         onNavigateBack()
                     }
                 }
@@ -393,7 +405,7 @@ fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
 @Composable
 fun TaskListScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<Category>, sortType: SortType, filterCategory: Category?) {
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current // YENİ: İptal için Context eklendi
+    val context = LocalContext.current // İptal ve Widget için Context eklendi
 
     var displayItems = if (filterCategory == null) allTasks else allTasks.filter { it.categoryId == filterCategory.id }
     displayItems = when(sortType) { SortType.DEFAULT -> displayItems; SortType.DATE_ASC -> displayItems.sortedWith(compareBy({ it.isDone }, { it.dueDate ?: Long.MAX_VALUE })); SortType.DATE_DESC -> displayItems.sortedWith(compareBy({ it.isDone }, { -(it.dueDate ?: 0L) })); SortType.PRIORITY -> displayItems.sortedWith(compareBy({ it.isDone }, { -(it.priority ?: 0) })) }
@@ -406,16 +418,20 @@ fun TaskListScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<Cate
             onCheckedChange = { isChecked ->
                 scope.launch {
                     dao.update(item.copy(isDone = isChecked))
-                    // YENİ: Tik atılırsa Alarmı İptal Et, Tik kaldırılırsa Yeniden Kur
                     if (isChecked) cancelNotification(context, item.id)
                     else if (item.hasReminder) scheduleNotification(context, item.id, item.title, item.notes, item.dueDate, item.dueTime, item.priority)
+
+                    // YENİ EKLENEN: Görev durumu değiştiğinde widget yenilenir
+                    refreshQuickDoWidget(context)
                 }
             },
             onDeleteClick = {
                 scope.launch {
                     dao.delete(item)
-                    // YENİ: Görev Silinirse Alarmı İptal Et
                     cancelNotification(context, item.id)
+
+                    // YENİ EKLENEN: Görev silindiğinde widget yenilenir
+                    refreshQuickDoWidget(context)
                 }
             },
             onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } }
@@ -428,7 +444,7 @@ fun TaskListScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<Cate
 fun CalendarViewScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<Category>) {
     val datePickerState = rememberDatePickerState()
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current // YENİ: İptal için Context eklendi
+    val context = LocalContext.current // İptal ve Widget için Context eklendi
 
     val upcomingTasks = allTasks.filter { it.dueDate != null }.sortedBy { it.dueDate }
     val selectedDateString = formatMillisToDateString(datePickerState.selectedDateMillis)
@@ -452,12 +468,18 @@ fun CalendarViewScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<
                         dao.update(item.copy(isDone = isChecked))
                         if (isChecked) cancelNotification(context, item.id)
                         else if (item.hasReminder) scheduleNotification(context, item.id, item.title, item.notes, item.dueDate, item.dueTime, item.priority)
+
+                        // YENİ EKLENEN: Görev durumu değiştiğinde widget yenilenir
+                        refreshQuickDoWidget(context)
                     }
                 },
                 onDeleteClick = {
                     scope.launch {
                         dao.delete(item)
                         cancelNotification(context, item.id)
+
+                        // YENİ EKLENEN: Görev silindiğinde widget yenilenir
+                        refreshQuickDoWidget(context)
                     }
                 },
                 onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } }
@@ -465,34 +487,32 @@ fun CalendarViewScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<
     }
 }
 
-// --- 8. GÖREV KARTI (SÜRESİ DOLANLAR VE TAMAMLANANLAR İÇİN GÖRSEL GÜNCELLEME) ---
+// --- 8. GÖREV KARTI (SÜRESİ DOLANLAR VE TAMAMLANANLAR İÇİN KESİN RENKLER) ---
 @Composable
 fun TodoItemRow(item: TodoItem, categories: List<Category>, onCheckedChange: (Boolean) -> Unit, onDeleteClick: () -> Unit, onTaskUpdate: (TodoItem) -> Unit) {
     var expanded by remember(item.id) { mutableStateOf(false) }
     var currentNotes by remember(item.id, item.notes) { mutableStateOf(item.notes) }
     val taskCategory = categories.find { it.id == item.categoryId }
 
-    // MÜHENDİSLİK: Görevin zaman durumunu hesaplıyoruz
     val remainingTimeText = calculateRemainingTime(item.dueDate, item.dueTime)
     val isOverdue = !item.isDone && remainingTimeText == "Süresi doldu!"
 
-    // YENİ: Kartın Arka Plan Rengini Duruma Göre Belirle
+    // YENİ VE KESİN ÇÖZÜM: Telefonun temasını ezen sabit renkler!
     val cardColor = when {
-        item.isDone -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f) // Yapıldıysa karart (Gri/Saydam)
-        isOverdue -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.8f)   // Geciktiyse hafif kırmızı (Uyarı Rengi)
-        else -> MaterialTheme.colorScheme.surface                                  // Normal görev rengi
+        item.isDone -> Color.Gray.copy(alpha = 0.2f)
+        isOverdue -> Color.Red.copy(alpha = 0.15f)
+        else -> MaterialTheme.colorScheme.surfaceVariant
     }
 
     Card(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { expanded = !expanded }.animateContentSize(),
         elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 6.dp else 2.dp),
-        colors = CardDefaults.cardColors(containerColor = cardColor) // YENİ: Rengi karta uyguladık
+        colors = CardDefaults.cardColors(containerColor = cardColor)
     ) {
         Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = item.isDone, onCheckedChange = onCheckedChange)
 
-                // İçeriklerin şeffaflığını (Opacity) görev yapıldıysa düşürüyoruz
                 val contentAlpha = if (item.isDone) 0.5f else 1f
 
                 Column(modifier = Modifier.weight(1f)) {
@@ -525,7 +545,7 @@ fun TodoItemRow(item: TodoItem, categories: List<Category>, onCheckedChange: (Bo
                         )
 
                         if (isOverdue) {
-                            Text(text = "⏳ Süresi doldu!", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                            Text(text = "⏳ Süresi doldu!", style = MaterialTheme.typography.bodySmall, color = Color.Red.copy(alpha = 0.8f), fontWeight = FontWeight.Bold)
                         } else if (!item.isDone && remainingTimeText != null) {
                             Text(text = "⏳ $remainingTimeText", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
                         }
