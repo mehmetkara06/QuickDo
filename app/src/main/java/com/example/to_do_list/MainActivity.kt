@@ -219,13 +219,17 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// --- 4. ANA İSKELET VE NAVİGASYON ---
+// --- 4. ANA İSKELET VE NAVİGASYON (SNACKBAR YÖNETİCİSİ EKLENDİ) ---
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainAppScaffold(dao: TodoDao) {
     var currentScreen by remember { mutableStateOf(AppScreen.TASKS) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+
+    // YENİ ADIM 1: Snackbar (Alttan çıkan mesaj) Yöneticisini tanımlıyoruz
+    val snackbarHostState = remember { SnackbarHostState() }
+
     val categories by dao.getAllCategories().collectAsState(initial = emptyList())
     val allTasks by dao.getAll().collectAsState(initial = emptyList())
     var showFilterDialog by remember { mutableStateOf(false) }
@@ -276,6 +280,9 @@ fun MainAppScaffold(dao: TodoDao) {
         }
     ) {
         Scaffold(
+            // YENİ ADIM 2: Scaffold'a mesaj kutusunun nerede çıkacağını söylüyoruz
+            snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+
             topBar = {
                 TopAppBar(
                     title = { Text(when(currentScreen) { AppScreen.TASKS -> "Görevlerim"; AppScreen.CALENDAR -> "Takvim"; AppScreen.ADD_TASK -> "Yeni Görev" }) },
@@ -288,15 +295,15 @@ fun MainAppScaffold(dao: TodoDao) {
         ) { paddingValues ->
             Box(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
                 when (currentScreen) {
-                    AppScreen.TASKS -> TaskListScreen(dao, allTasks, categories, currentSortType, currentCategoryFilter)
-                    AppScreen.CALENDAR -> CalendarViewScreen(dao, allTasks, categories)
+                    // YENİ ADIM 3: Snackbar yöneticisini bu ekranlara yolluyoruz ki içerde kullanabilelim
+                    AppScreen.TASKS -> TaskListScreen(dao, allTasks, categories, currentSortType, currentCategoryFilter, snackbarHostState)
+                    AppScreen.CALENDAR -> CalendarViewScreen(dao, allTasks, categories, snackbarHostState)
                     AppScreen.ADD_TASK -> AddTaskScreen(dao = dao, onNavigateBack = { currentScreen = AppScreen.TASKS })
                 }
             }
         }
     }
 }
-
 // --- 5. GÖREV EKLEME EKRANI ---
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -406,19 +413,24 @@ fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
     }
 }
 
-// --- 6. GÖREV LİSTESİ EKRANI (DÜZENLEME BAĞLANTISI EKLENDİ) ---
+// --- 6. GÖREV LİSTESİ EKRANI (GERİ AL MEKANİZMASI EKLENDİ) ---
 @Composable
-fun TaskListScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<Category>, sortType: SortType, filterCategory: Category?) {
+fun TaskListScreen(
+    dao: TodoDao,
+    allTasks: List<TodoItem>,
+    categories: List<Category>,
+    sortType: SortType,
+    filterCategory: Category?,
+    snackbarHostState: SnackbarHostState // İŞTE EKSİK OLAN KÖPRÜ BURASI!
+) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
-    // YENİ: Düzenleme penceresini yöneten durumlar
     var taskToEdit by remember { mutableStateOf<TodoItem?>(null) }
 
     var displayItems = if (filterCategory == null) allTasks else allTasks.filter { it.categoryId == filterCategory.id }
     displayItems = when(sortType) { SortType.DEFAULT -> displayItems; SortType.DATE_ASC -> displayItems.sortedWith(compareBy({ it.isDone }, { it.dueDate ?: Long.MAX_VALUE })); SortType.DATE_DESC -> displayItems.sortedWith(compareBy({ it.isDone }, { -(it.dueDate ?: 0L) })); SortType.PRIORITY -> displayItems.sortedWith(compareBy({ it.isDone }, { -(it.priority ?: 0) })) }
 
-    // Eğer basılı tutulmuş bir görev varsa düzenleme penceresini aç
     taskToEdit?.let { item ->
         EditTaskDialog(
             item = item,
@@ -427,15 +439,11 @@ fun TaskListScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<Cate
             onSave = { updatedItem ->
                 scope.launch {
                     dao.update(updatedItem)
-
-                    // YENİ EKLENEN: Alarmları da yenile!
-                    cancelNotification(context, updatedItem.id) // Önceki alarmı iptal et
+                    cancelNotification(context, updatedItem.id)
                     if (updatedItem.hasReminder && !updatedItem.isDone) {
-                        // Seçenek işaretliyse ve görev bitmediyse yeni alarm kur
                         scheduleNotification(context, updatedItem.id, updatedItem.title, updatedItem.notes, updatedItem.dueDate, updatedItem.dueTime, updatedItem.priority)
                     }
-
-                    refreshQuickDoWidget(context) // Widget'ı da yenile
+                    refreshQuickDoWidget(context)
                     taskToEdit = null
                 }
             }
@@ -460,13 +468,26 @@ fun TaskListScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<Cate
                     },
                     onDeleteClick = {
                         scope.launch {
-                            dao.delete(item)
-                            cancelNotification(context, item.id)
-                            refreshQuickDoWidget(context)
+                            val backupItem = item // Yedeği al
+                            dao.delete(item) // Görevi sil
+                            refreshQuickDoWidget(context) // Widget'ı güncelle
+
+                            // Alttan mesajı çıkar
+                            val result = snackbarHostState.showSnackbar(
+                                message = "\"${item.title}\" silindi",
+                                actionLabel = "Geri Al",
+                                duration = SnackbarDuration.Short
+                            )
+
+                            // Geri Al'a basılırsa kurtar
+                            if (result == SnackbarResult.ActionPerformed) {
+                                dao.insert(backupItem)
+                                refreshQuickDoWidget(context)
+                            }
                         }
                     },
                     onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } },
-                    onEditClick = { taskToEdit = item } // YENİ: Basılı tutulunca burası çalışır
+                    onEditClick = { taskToEdit = item }
                 )
             }
         }
@@ -615,22 +636,25 @@ fun TodoItemRow(
     )
 }
 
-// --- 7. TAKVİM EKRANI (DÜZENLEME BAĞLANTISI EKLENDİ) ---
+// --- 7. TAKVİM EKRANI (GERİ AL MEKANİZMASI EKLENDİ) ---
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CalendarViewScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<Category>) {
+fun CalendarViewScreen(
+    dao: TodoDao,
+    allTasks: List<TodoItem>,
+    categories: List<Category>,
+    snackbarHostState: SnackbarHostState // KÖPRÜ BURAYA DA EKLENDİ
+) {
     val datePickerState = rememberDatePickerState()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
-    // YENİ: Takvim ekranı için de düzenleme penceresi yöneticisi eklendi
     var taskToEdit by remember { mutableStateOf<TodoItem?>(null) }
 
     val upcomingTasks = allTasks.filter { it.dueDate != null }.sortedBy { it.dueDate }
     val selectedDateString = formatMillisToDateString(datePickerState.selectedDateMillis)
     val tasksForSelectedDate = allTasks.filter { item -> item.dueDate != null && formatMillisToDateString(item.dueDate) == selectedDateString }
 
-    // YENİ: Takvim ekranında bir göreve basılı tutulursa pencereyi aç
     taskToEdit?.let { item ->
         EditTaskDialog(
             item = item,
@@ -639,13 +663,10 @@ fun CalendarViewScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<
             onSave = { updatedItem ->
                 scope.launch {
                     dao.update(updatedItem)
-
-                    // YENİ EKLENEN: Alarmları da yenile!
                     cancelNotification(context, updatedItem.id)
                     if (updatedItem.hasReminder && !updatedItem.isDone) {
                         scheduleNotification(context, updatedItem.id, updatedItem.title, updatedItem.notes, updatedItem.dueDate, updatedItem.dueTime, updatedItem.priority)
                     }
-
                     refreshQuickDoWidget(context)
                     taskToEdit = null
                 }
@@ -676,13 +697,24 @@ fun CalendarViewScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<
                 },
                 onDeleteClick = {
                     scope.launch {
+                        val backupItem = item
                         dao.delete(item)
-                        cancelNotification(context, item.id)
                         refreshQuickDoWidget(context)
+
+                        val result = snackbarHostState.showSnackbar(
+                            message = "\"${item.title}\" silindi",
+                            actionLabel = "Geri Al",
+                            duration = SnackbarDuration.Short
+                        )
+
+                        if (result == SnackbarResult.ActionPerformed) {
+                            dao.insert(backupItem)
+                            refreshQuickDoWidget(context)
+                        }
                     }
                 },
                 onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } },
-                onEditClick = { taskToEdit = item } // İŞTE EKSİK OLAN BAĞLANTI BURADA EKLENDİ!
+                onEditClick = { taskToEdit = item }
             ) } }
     }
 }
