@@ -206,7 +206,7 @@ interface TodoDao {
 @Database(entities = [TodoItem::class, Category::class], version = 1)
 abstract class AppDatabase : RoomDatabase() { abstract fun todoDao(): TodoDao }
 
-enum class AppScreen { TASKS, CALENDAR, ADD_TASK }
+enum class AppScreen { TASKS, CALENDAR, ADD_TASK, SETTINGS }
 enum class SortType(val label: String) { DEFAULT("Varsayılan Sıralama"), DATE_ASC("Önce Yakın Tarihliler"), DATE_DESC("Önce Uzak Tarihliler"), PRIORITY("Önce En Önemliler") }
 
 // --- 3. ANA AKTİVİTE ---
@@ -276,6 +276,7 @@ fun MainAppScaffold(dao: TodoDao) {
                 HorizontalDivider()
                 NavigationDrawerItem(label = { Text("📋 Görevlerim") }, selected = currentScreen == AppScreen.TASKS, onClick = { currentScreen = AppScreen.TASKS; scope.launch { drawerState.close() } }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
                 NavigationDrawerItem(label = { Text("📅 Takvim") }, selected = currentScreen == AppScreen.CALENDAR, onClick = { currentScreen = AppScreen.CALENDAR; scope.launch { drawerState.close() } }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
+                NavigationDrawerItem(label = { Text("⚙️ Ayarlar") }, selected = currentScreen == AppScreen.SETTINGS, onClick = { currentScreen = AppScreen.SETTINGS; scope.launch { drawerState.close() } }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
             }
         }
     ) {
@@ -285,7 +286,7 @@ fun MainAppScaffold(dao: TodoDao) {
 
             topBar = {
                 TopAppBar(
-                    title = { Text(when(currentScreen) { AppScreen.TASKS -> "Görevlerim"; AppScreen.CALENDAR -> "Takvim"; AppScreen.ADD_TASK -> "Yeni Görev" }) },
+                    title = { Text(when(currentScreen) { AppScreen.TASKS -> "Görevlerim"; AppScreen.CALENDAR -> "Takvim"; AppScreen.ADD_TASK -> "Yeni Görev" ; AppScreen.SETTINGS -> "Ayarlar"}) },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
                     navigationIcon = { IconButton(onClick = { scope.launch { drawerState.open() } }) { Icon(Icons.Default.Menu, "Menüyü Aç") } },
                     actions = { if (currentScreen == AppScreen.TASKS) { IconButton(onClick = { showFilterDialog = true }) { Text("🔽", style = MaterialTheme.typography.titleLarge) } } }
@@ -295,10 +296,11 @@ fun MainAppScaffold(dao: TodoDao) {
         ) { paddingValues ->
             Box(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
                 when (currentScreen) {
-                    // YENİ ADIM 3: Snackbar yöneticisini bu ekranlara yolluyoruz ki içerde kullanabilelim
                     AppScreen.TASKS -> TaskListScreen(dao, allTasks, categories, currentSortType, currentCategoryFilter, snackbarHostState)
                     AppScreen.CALENDAR -> CalendarViewScreen(dao, allTasks, categories, snackbarHostState)
                     AppScreen.ADD_TASK -> AddTaskScreen(dao = dao, onNavigateBack = { currentScreen = AppScreen.TASKS })
+                    // İŞTE YENİ EKLENEN SATIR BURASI:
+                    AppScreen.SETTINGS -> SettingsScreen(dao = dao, snackbarHostState = snackbarHostState)
                 }
             }
         }
@@ -819,4 +821,85 @@ fun EditTaskDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("İptal") } }
     )
+}
+// --- 10. AYARLAR EKRANI ---
+@Composable
+fun SettingsScreen(dao: TodoDao, snackbarHostState: SnackbarHostState) {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+
+    // Not: Bu ayarlar şimdilik RAM'de tutuluyor. Kalıcı (uygulama kapanıp açılınca hatırlanan)
+    // hale getirmek için bir sonraki aşamada "DataStore" ekleyeceğiz. Şimdilik UI'ı (arayüzü) kuruyoruz.
+    var isDarkMode by remember { mutableStateOf(true) }
+    var notificationsEnabled by remember { mutableStateOf(true) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+
+    // Kritik işlem için Onay Penceresi (Emin misin?)
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("Tüm Verileri Sil?") },
+            text = { Text("Bu işlem geri alınamaz. Veritabanındaki tüm görevleriniz kalıcı olarak uçurularak fabrika ayarlarına dönülecektir.") },
+            confirmButton = {
+                Button(colors = ButtonDefaults.buttonColors(containerColor = Color.Red), onClick = {
+                    scope.launch {
+                        // Veritabanını tamamen temizleme işlemi
+                        dao.getAll().collect { tasks ->
+                            tasks.forEach { task ->
+                                cancelNotification(context, task.id) // Önce tüm alarmları iptal et
+                                dao.delete(task) // Sonra görevleri sil
+                            }
+                        }
+                        refreshQuickDoWidget(context)
+                        showDeleteConfirm = false
+                        snackbarHostState.showSnackbar("Tüm görevler başarıyla temizlendi.")
+                    }
+                }) { Text("Evet, Her Şeyi Sil", color = Color.White) }
+            },
+            dismissButton = { TextButton(onClick = { showDeleteConfirm = false }) { Text("Vazgeç") } }
+        )
+    }
+
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Text("Görünüm ve Bildirimler", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Column(modifier = Modifier.padding(8.dp)) {
+                Row(modifier = Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Column {
+                        Text("Karanlık Tema", fontWeight = FontWeight.Bold)
+                        Text("Uygulamayı koyu renk tonlarında kullan", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(checked = isDarkMode, onCheckedChange = { isDarkMode = it })
+                }
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 8.dp))
+                Row(modifier = Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Column {
+                        Text("Hatırlatıcı Alarmlar", fontWeight = FontWeight.Bold)
+                        Text("Görev zamanı geldiğinde bildirim gönder", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(checked = notificationsEnabled, onCheckedChange = { notificationsEnabled = it })
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+        Text("Tehlikeli Bölge", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.error)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f))) {
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable { showDeleteConfirm = true }.padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text("Tüm Verileri Temizle", fontWeight = FontWeight.Bold, color = Color.Red)
+                    Text("Uygulamayı fabrika ayarlarına sıfırla", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Icon(Icons.Default.Delete, contentDescription = "Sil", tint = Color.Red)
+            }
+        }
+    }
 }
