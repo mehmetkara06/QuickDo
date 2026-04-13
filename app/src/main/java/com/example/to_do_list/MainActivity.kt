@@ -11,11 +11,14 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DateRange
@@ -42,6 +45,8 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.glance.appwidget.updateAll // Widget'ı güncellemek için gerekli
 
 // --- YARDIMCI FONKSİYON 1: Tarihi Formatla ---
@@ -401,54 +406,252 @@ fun AddTaskScreen(dao: TodoDao, onNavigateBack: () -> Unit) {
     }
 }
 
-// --- 6. GÖREV LİSTESİ EKRANI ---
+// --- 6. GÖREV LİSTESİ EKRANI (DÜZENLEME BAĞLANTISI EKLENDİ) ---
 @Composable
 fun TaskListScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<Category>, sortType: SortType, filterCategory: Category?) {
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current // İptal ve Widget için Context eklendi
+    val context = LocalContext.current
+
+    // YENİ: Düzenleme penceresini yöneten durumlar
+    var taskToEdit by remember { mutableStateOf<TodoItem?>(null) }
 
     var displayItems = if (filterCategory == null) allTasks else allTasks.filter { it.categoryId == filterCategory.id }
     displayItems = when(sortType) { SortType.DEFAULT -> displayItems; SortType.DATE_ASC -> displayItems.sortedWith(compareBy({ it.isDone }, { it.dueDate ?: Long.MAX_VALUE })); SortType.DATE_DESC -> displayItems.sortedWith(compareBy({ it.isDone }, { -(it.dueDate ?: 0L) })); SortType.PRIORITY -> displayItems.sortedWith(compareBy({ it.isDone }, { -(it.priority ?: 0) })) }
 
-    if (displayItems.isEmpty()) { Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (filterCategory == null) "Görev yok. Sağ alttaki + butonuna tıkla!" else "Bu kriterlere uygun görev bulunamadı.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-    } else { LazyColumn(contentPadding = PaddingValues(16.dp)) { items(displayItems, key = { it.id }) { item ->
-        TodoItemRow(
+    // Eğer basılı tutulmuş bir görev varsa düzenleme penceresini aç
+    taskToEdit?.let { item ->
+        EditTaskDialog(
             item = item,
             categories = categories,
-            onCheckedChange = { isChecked ->
+            onDismiss = { taskToEdit = null },
+            onSave = { updatedItem ->
                 scope.launch {
-                    dao.update(item.copy(isDone = isChecked))
-                    if (isChecked) cancelNotification(context, item.id)
-                    else if (item.hasReminder) scheduleNotification(context, item.id, item.title, item.notes, item.dueDate, item.dueTime, item.priority)
+                    dao.update(updatedItem)
 
-                    // YENİ EKLENEN: Görev durumu değiştiğinde widget yenilenir
-                    refreshQuickDoWidget(context)
-                }
-            },
-            onDeleteClick = {
-                scope.launch {
-                    dao.delete(item)
-                    cancelNotification(context, item.id)
+                    // YENİ EKLENEN: Alarmları da yenile!
+                    cancelNotification(context, updatedItem.id) // Önceki alarmı iptal et
+                    if (updatedItem.hasReminder && !updatedItem.isDone) {
+                        // Seçenek işaretliyse ve görev bitmediyse yeni alarm kur
+                        scheduleNotification(context, updatedItem.id, updatedItem.title, updatedItem.notes, updatedItem.dueDate, updatedItem.dueTime, updatedItem.priority)
+                    }
 
-                    // YENİ EKLENEN: Görev silindiğinde widget yenilenir
-                    refreshQuickDoWidget(context)
+                    refreshQuickDoWidget(context) // Widget'ı da yenile
+                    taskToEdit = null
                 }
-            },
-            onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } }
-        ) } } }
+            }
+        )
+    }
+
+    if (displayItems.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (filterCategory == null) "Görev yok. Sağ alttaki + butonuna tıkla!" else "Bu kriterlere uygun görev bulunamadı.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    } else {
+        LazyColumn(contentPadding = PaddingValues(16.dp)) {
+            items(displayItems, key = { it.id }) { item ->
+                TodoItemRow(
+                    item = item,
+                    categories = categories,
+                    onCheckedChange = { isChecked ->
+                        scope.launch {
+                            dao.update(item.copy(isDone = isChecked))
+                            if (isChecked) cancelNotification(context, item.id)
+                            else if (item.hasReminder) scheduleNotification(context, item.id, item.title, item.notes, item.dueDate, item.dueTime, item.priority)
+                            refreshQuickDoWidget(context)
+                        }
+                    },
+                    onDeleteClick = {
+                        scope.launch {
+                            dao.delete(item)
+                            cancelNotification(context, item.id)
+                            refreshQuickDoWidget(context)
+                        }
+                    },
+                    onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } },
+                    onEditClick = { taskToEdit = item } // YENİ: Basılı tutulunca burası çalışır
+                )
+            }
+        }
+    }
 }
 
-// --- 7. TAKVİM EKRANI ---
+// --- 8. GÖREV KARTI (KAYDIRMA VE BASILI TUTMA EKLENDİ - GÜNCEL) ---
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@Composable
+fun TodoItemRow(
+    item: TodoItem,
+    categories: List<Category>,
+    onCheckedChange: (Boolean) -> Unit,
+    onDeleteClick: () -> Unit,
+    onTaskUpdate: (TodoItem) -> Unit,
+    onEditClick: () -> Unit
+) {
+    var expanded by remember(item.id) { mutableStateOf(false) }
+    var currentNotes by remember(item.id, item.notes) { mutableStateOf(item.notes) }
+    val taskCategory = categories.find { it.id == item.categoryId }
+    val remainingTimeText = calculateRemainingTime(item.dueDate, item.dueTime)
+    val isOverdue = !item.isDone && remainingTimeText == "Süresi doldu!"
+
+    val cardColor = when {
+        item.isDone -> Color.Gray.copy(alpha = 0.2f)
+        isOverdue -> Color.Red.copy(alpha = 0.15f)
+        else -> MaterialTheme.colorScheme.surfaceVariant
+    }
+
+    // --- HAFIZA (STALE CLOSURE) ÇÖZÜMÜ ---
+    // YENİ: Sisteme her zaman en güncel veriyi kullanmasını emrediyoruz!
+    val currentItem by rememberUpdatedState(item)
+    val currentOnCheckedChange by rememberUpdatedState(onCheckedChange)
+    val currentOnDeleteClick by rememberUpdatedState(onDeleteClick)
+
+    // --- ÇİFT YÖNLÜ KAYDIRMA MOTORU ---
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { dismissValue ->
+            when (dismissValue) {
+                SwipeToDismissBoxValue.EndToStart -> {
+                    // Sola kaydırdı: SİL
+                    currentOnDeleteClick()
+                    true // Kartı tamamen uçur
+                }
+                SwipeToDismissBoxValue.StartToEnd -> {
+                    // Sağa kaydırdı: YAPILDI/YAPILMADI DEĞİŞTİR
+                    // DİKKAT: Artık 'item' değil, taze olan 'currentItem' kullanıyoruz!
+                    currentOnCheckedChange(!currentItem.isDone)
+                    false // Kartı uçurma, yerine geri dönsün
+                }
+                else -> false
+            }
+        }
+    )
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromEndToStart = true, // Silme aktif
+        enableDismissFromStartToEnd = true, // Yapıldı işaretleme aktif
+        backgroundContent = {
+            // YÖNE GÖRE ARKA PLAN VE İKON BELİRLEME
+            val isDeleting = dismissState.targetValue == SwipeToDismissBoxValue.EndToStart
+            val isCompleting = dismissState.targetValue == SwipeToDismissBoxValue.StartToEnd
+
+            val backgroundColor = when {
+                isDeleting -> Color(0xFFE53935) // Silme Kırmızısı
+                isCompleting -> Color(0xFF4CAF50) // Yapıldı Yeşili
+                else -> Color.Transparent
+            }
+
+            val icon = if (isDeleting) Icons.Default.Delete else Icons.Default.Add // Add yerine varsa 'Check' kullanabilirsin
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(vertical = 4.dp)
+                    .background(backgroundColor, MaterialTheme.shapes.medium)
+                    .padding(horizontal = 24.dp),
+                contentAlignment = if (isCompleting) Alignment.CenterStart else Alignment.CenterEnd
+            ) {
+                // Eğer yapıldı yapıyorsa onay işareti, siliyorsa çöp kutusu
+                if (isDeleting || isCompleting) {
+                    Text(
+                        text = if (isCompleting) (if (item.isDone) "↩️ Geri Al" else "✅ Yapıldı") else "🗑️ Sil",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        },
+        content = {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp)
+                    .combinedClickable(
+                        onClick = { expanded = !expanded },
+                        onLongClick = { onEditClick() }
+                    )
+                    .animateContentSize(),
+                elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 6.dp else 2.dp),
+                colors = CardDefaults.cardColors(containerColor = cardColor)
+            ) {
+                Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = item.isDone, onCheckedChange = onCheckedChange)
+                        val contentAlpha = if (item.isDone) 0.5f else 1f
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = item.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                textDecoration = if (item.isDone) TextDecoration.LineThrough else TextDecoration.None,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = contentAlpha)
+                            )
+                            if (taskCategory != null) {
+                                Surface(color = Color(taskCategory.colorCode).copy(alpha = if (item.isDone) 0.1f else 0.2f), shape = MaterialTheme.shapes.small, modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)) {
+                                    Text(text = taskCategory.name, color = Color(taskCategory.colorCode).copy(alpha = contentAlpha), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                }
+                            }
+                            // Tarih ve zaman bilgileri... (Kodun devamı aynı kalıyor)
+                            if (item.dueDate != null || item.dueTime != null) {
+                                val dateStr = if (item.dueDate != null) formatMillisToDateString(item.dueDate) else "Her Gün"
+                                val timeStr = if (item.dueTime != null) " - ${item.dueTime}" else ""
+                                val bellIcon = if (item.hasReminder) " 🔔" else ""
+                                Text(text = "📅 $dateStr$timeStr$bellIcon", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = contentAlpha))
+                                if (isOverdue) {
+                                    Text(text = "⏳ Süresi doldu!", style = MaterialTheme.typography.bodySmall, color = Color.Red.copy(alpha = 0.8f), fontWeight = FontWeight.Bold)
+                                } else if (!item.isDone && remainingTimeText != null) {
+                                    Text(text = "⏳ $remainingTimeText", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                        }
+                        if (item.priority != null) {
+                            Row { for (i in 1..item.priority) { Icon(Icons.Filled.Star, contentDescription = null, tint = Color(0xFFFFC107).copy(alpha = contentAlpha), modifier = Modifier.size(16.dp)) } }
+                        }
+                    }
+                    if (expanded) {
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                        OutlinedTextField(value = currentNotes, onValueChange = { currentNotes = it }, label = { Text("Hızlı Not") }, modifier = Modifier.fillMaxWidth(), minLines = 1)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(onClick = { onTaskUpdate(item.copy(notes = currentNotes)); expanded = false }, modifier = Modifier.align(Alignment.End)) { Text("Notu Kaydet") }
+                    }
+                }
+            }
+        }
+    )
+}
+
+// --- 7. TAKVİM EKRANI (DÜZENLEME BAĞLANTISI EKLENDİ) ---
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CalendarViewScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<Category>) {
     val datePickerState = rememberDatePickerState()
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current // İptal ve Widget için Context eklendi
+    val context = LocalContext.current
+
+    // YENİ: Takvim ekranı için de düzenleme penceresi yöneticisi eklendi
+    var taskToEdit by remember { mutableStateOf<TodoItem?>(null) }
 
     val upcomingTasks = allTasks.filter { it.dueDate != null }.sortedBy { it.dueDate }
     val selectedDateString = formatMillisToDateString(datePickerState.selectedDateMillis)
     val tasksForSelectedDate = allTasks.filter { item -> item.dueDate != null && formatMillisToDateString(item.dueDate) == selectedDateString }
+
+    // YENİ: Takvim ekranında bir göreve basılı tutulursa pencereyi aç
+    taskToEdit?.let { item ->
+        EditTaskDialog(
+            item = item,
+            categories = categories,
+            onDismiss = { taskToEdit = null },
+            onSave = { updatedItem ->
+                scope.launch {
+                    dao.update(updatedItem)
+
+                    // YENİ EKLENEN: Alarmları da yenile!
+                    cancelNotification(context, updatedItem.id)
+                    if (updatedItem.hasReminder && !updatedItem.isDone) {
+                        scheduleNotification(context, updatedItem.id, updatedItem.title, updatedItem.notes, updatedItem.dueDate, updatedItem.dueTime, updatedItem.priority)
+                    }
+
+                    refreshQuickDoWidget(context)
+                    taskToEdit = null
+                }
+            }
+        )
+    }
 
     LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
         item { DatePicker(state = datePickerState, modifier = Modifier.fillMaxWidth(), title = null, headline = null, showModeToggle = false) }
@@ -468,8 +671,6 @@ fun CalendarViewScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<
                         dao.update(item.copy(isDone = isChecked))
                         if (isChecked) cancelNotification(context, item.id)
                         else if (item.hasReminder) scheduleNotification(context, item.id, item.title, item.notes, item.dueDate, item.dueTime, item.priority)
-
-                        // YENİ EKLENEN: Görev durumu değiştiğinde widget yenilenir
                         refreshQuickDoWidget(context)
                     }
                 },
@@ -477,91 +678,113 @@ fun CalendarViewScreen(dao: TodoDao, allTasks: List<TodoItem>, categories: List<
                     scope.launch {
                         dao.delete(item)
                         cancelNotification(context, item.id)
-
-                        // YENİ EKLENEN: Görev silindiğinde widget yenilenir
                         refreshQuickDoWidget(context)
                     }
                 },
-                onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } }
+                onTaskUpdate = { updatedItem -> scope.launch { dao.update(updatedItem) } },
+                onEditClick = { taskToEdit = item } // İŞTE EKSİK OLAN BAĞLANTI BURADA EKLENDİ!
             ) } }
     }
 }
-
-// --- 8. GÖREV KARTI (SÜRESİ DOLANLAR VE TAMAMLANANLAR İÇİN KESİN RENKLER) ---
+// --- 9. GÖREV DÜZENLEME PENCERESİ (TAM DONANIMLI) ---
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TodoItemRow(item: TodoItem, categories: List<Category>, onCheckedChange: (Boolean) -> Unit, onDeleteClick: () -> Unit, onTaskUpdate: (TodoItem) -> Unit) {
-    var expanded by remember(item.id) { mutableStateOf(false) }
-    var currentNotes by remember(item.id, item.notes) { mutableStateOf(item.notes) }
-    val taskCategory = categories.find { it.id == item.categoryId }
+fun EditTaskDialog(
+    item: TodoItem,
+    categories: List<Category>,
+    onDismiss: () -> Unit,
+    onSave: (TodoItem) -> Unit
+) {
+    var text by remember { mutableStateOf(item.title) }
+    var notesText by remember { mutableStateOf(item.notes) }
+    var selectedPriority by remember { mutableStateOf(item.priority) }
+    var selectedDate by remember { mutableStateOf(item.dueDate) }
+    var selectedTime by remember { mutableStateOf(item.dueTime) }
+    var hasReminder by remember { mutableStateOf(item.hasReminder) }
 
-    val remainingTimeText = calculateRemainingTime(item.dueDate, item.dueTime)
-    val isOverdue = !item.isDone && remainingTimeText == "Süresi doldu!"
+    var showDatePicker by remember { mutableStateOf(false) }
+    var showTimePicker by remember { mutableStateOf(false) }
 
-    // YENİ VE KESİN ÇÖZÜM: Telefonun temasını ezen sabit renkler!
-    val cardColor = when {
-        item.isDone -> Color.Gray.copy(alpha = 0.2f)
-        isOverdue -> Color.Red.copy(alpha = 0.15f)
-        else -> MaterialTheme.colorScheme.surfaceVariant
+    val datePickerState = rememberDatePickerState(initialSelectedDateMillis = item.dueDate)
+    val timePickerState = rememberTimePickerState(
+        initialHour = item.dueTime?.split(":")?.get(0)?.toIntOrNull() ?: 0,
+        initialMinute = item.dueTime?.split(":")?.get(1)?.toIntOrNull() ?: 0,
+        is24Hour = true
+    )
+
+    if (showDatePicker) {
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = { TextButton(onClick = { selectedDate = datePickerState.selectedDateMillis; showDatePicker = false }) { Text("Tamam") } },
+            dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("İptal") } }
+        ) { DatePicker(state = datePickerState) }
     }
 
-    Card(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { expanded = !expanded }.animateContentSize(),
-        elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 6.dp else 2.dp),
-        colors = CardDefaults.cardColors(containerColor = cardColor)
-    ) {
-        Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = item.isDone, onCheckedChange = onCheckedChange)
+    if (showTimePicker) {
+        TimePickerDialog(
+            onDismissRequest = { showTimePicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    val hour = timePickerState.hour.toString().padStart(2, '0')
+                    val minute = timePickerState.minute.toString().padStart(2, '0')
+                    selectedTime = "$hour:$minute"
+                    showTimePicker = false
+                }) { Text("Tamam") }
+            },
+            dismissButton = { TextButton(onClick = { showTimePicker = false }) { Text("İptal") } }
+        ) { TimePicker(state = timePickerState, modifier = Modifier.fillMaxWidth()) }
+    }
 
-                val contentAlpha = if (item.isDone) 0.5f else 1f
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = item.title,
-                        style = MaterialTheme.typography.titleMedium,
-                        textDecoration = if (item.isDone) TextDecoration.LineThrough else TextDecoration.None,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = contentAlpha)
-                    )
-
-                    if (taskCategory != null) {
-                        Surface(
-                            color = Color(taskCategory.colorCode).copy(alpha = if (item.isDone) 0.1f else 0.2f),
-                            shape = MaterialTheme.shapes.small,
-                            modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
-                        ) {
-                            Text(text = taskCategory.name, color = Color(taskCategory.colorCode).copy(alpha = contentAlpha), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                        }
-                    }
-
-                    if (item.dueDate != null || item.dueTime != null) {
-                        val dateStr = if (item.dueDate != null) formatMillisToDateString(item.dueDate) else "Her Gün"
-                        val timeStr = if (item.dueTime != null) " - ${item.dueTime}" else ""
-                        val bellIcon = if (item.hasReminder) " 🔔" else ""
-
-                        Text(
-                            text = "📅 $dateStr$timeStr$bellIcon",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = contentAlpha)
-                        )
-
-                        if (isOverdue) {
-                            Text(text = "⏳ Süresi doldu!", style = MaterialTheme.typography.bodySmall, color = Color.Red.copy(alpha = 0.8f), fontWeight = FontWeight.Bold)
-                        } else if (!item.isDone && remainingTimeText != null) {
-                            Text(text = "⏳ $remainingTimeText", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                        }
-                    }
-                }
-                if (item.priority != null) {
-                    Row { for (i in 1..item.priority) { Icon(Icons.Filled.Star, contentDescription = null, tint = Color(0xFFFFC107).copy(alpha = contentAlpha), modifier = Modifier.size(16.dp)) } }
-                }
-                IconButton(onClick = onDeleteClick) { Icon(Icons.Default.Delete, contentDescription = "Sil", tint = MaterialTheme.colorScheme.error.copy(alpha = contentAlpha)) }
-            }
-            if (expanded) {
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                OutlinedTextField(value = currentNotes, onValueChange = { currentNotes = it }, label = { Text("Görev Detayları / Notlar") }, modifier = Modifier.fillMaxWidth(), minLines = 2)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Görevi Düzenle") },
+        text = {
+            // YENİ: Ekran taşmasın diye scroll özelliği eklendi
+            Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                OutlinedTextField(value = text, onValueChange = { text = it }, label = { Text("Görev Adı") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                 Spacer(modifier = Modifier.height(8.dp))
-                Button(onClick = { onTaskUpdate(item.copy(notes = currentNotes)); expanded = false }, modifier = Modifier.align(Alignment.End)) { Text("Notu Kaydet") }
+                OutlinedTextField(value = notesText, onValueChange = { notesText = it }, label = { Text("Notlar") }, modifier = Modifier.fillMaxWidth(), minLines = 2)
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text("Önem Derecesi:", style = MaterialTheme.typography.bodyMedium)
+                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.Center) {
+                    for (i in 1..5) {
+                        IconButton(onClick = { selectedPriority = if (selectedPriority == i) null else i }) {
+                            Icon(imageVector = if (selectedPriority != null && i <= selectedPriority!!) Icons.Filled.Star else Icons.Outlined.Star, contentDescription = "$i Yıldız", tint = if (selectedPriority != null && i <= selectedPriority!!) Color(0xFFFFC107) else Color.Gray, modifier = Modifier.size(36.dp))
+                        }
+                    }
+                }
+
+                // YENİ: Tarih ve Saat Seçiciler
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { showDatePicker = true }, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Default.DateRange, contentDescription = null)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (selectedDate == null) "Tarih Seç" else formatMillisToDateString(selectedDate))
+                    }
+                    OutlinedButton(onClick = { showTimePicker = true }, modifier = Modifier.weight(1f)) {
+                        Text(selectedTime ?: "Saat Seç")
+                    }
+                }
+
+                // YENİ: Alarm (Hatırlatıcı) Seçeneği
+                Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Notifications, contentDescription = null, tint = if (hasReminder) MaterialTheme.colorScheme.primary else Color.Gray)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Bana Hatırlat", style = MaterialTheme.typography.bodyLarge)
+                    }
+                    Switch(checked = hasReminder, onCheckedChange = { hasReminder = it })
+                }
             }
-        }
-    }
+        },
+        confirmButton = {
+            Button(onClick = {
+                if (text.isNotBlank()) {
+                    onSave(item.copy(title = text, notes = notesText, priority = selectedPriority, dueDate = selectedDate, dueTime = selectedTime, hasReminder = hasReminder))
+                }
+            }) { Text("Kaydet") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("İptal") } }
+    )
 }
