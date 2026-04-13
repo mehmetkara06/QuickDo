@@ -48,7 +48,93 @@ import java.util.concurrent.TimeUnit
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.glance.appwidget.updateAll // Widget'ı güncellemek için gerekli
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.draw.scale
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
+import androidx.compose.ui.res.painterResource
+import kotlinx.coroutines.delay
+import androidx.compose.foundation.Image
 
+// --- 🌟 QUICKDO PROFESYONEL TEMA MOTORU ---
+
+// 1. Modern Renk Paleti (Gece Mavisi ve Elektrik Mavisi)
+val QuickDoPrimary = Color(0xFF2563EB) // Aksiyonlar için Canlı Elektrik Mavisi
+val QuickDoBackgroundLight = Color(0xFFF8FAFC) // Ferah, çok açık buz grisi
+val QuickDoSurfaceLight = Color(0xFFFFFFFF) // Saf beyaz kartlar
+
+val QuickDoBackgroundDark = Color(0xFF0F172A) // Çok Koyu Lacivert (Siyaha yakın, çok premium durur)
+val QuickDoSurfaceDark = Color(0xFF1E293B) // Kartlar için biraz daha açık lacivert/gri
+
+// 2. Renk Şemaları
+private val LightColorScheme = lightColorScheme(
+    primary = QuickDoPrimary,
+    background = QuickDoBackgroundLight,
+    surface = QuickDoSurfaceLight,
+    surfaceVariant = Color(0xFFF1F5F9), // Seçili kartlar için hafif gri
+    onPrimary = Color.White,
+    onBackground = Color(0xFF1E293B),
+    onSurface = Color(0xFF1E293B)
+)
+
+private val DarkColorScheme = darkColorScheme(
+    primary = Color(0xFF3B82F6), // Karanlık modda göz yormayan biraz daha açık mavi
+    background = QuickDoBackgroundDark,
+    surface = QuickDoSurfaceDark,
+    surfaceVariant = Color(0xFF334155),
+    onPrimary = Color.White,
+    onBackground = Color(0xFFF8FAFC),
+    onSurface = Color(0xFFF8FAFC)
+)
+
+// 3. Özel Tipografi (Daha modern, sıkı ve okunaklı)
+val QuickDoTypography = Typography(
+    headlineMedium = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.ExtraBold,
+        fontSize = 28.sp,
+        letterSpacing = (-0.5).sp // Harfleri hafif birbirine yaklaştırarak modern bir his verir
+    ),
+    titleMedium = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Bold,
+        fontSize = 18.sp,
+        letterSpacing = 0.sp
+    ),
+    bodyMedium = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Normal,
+        fontSize = 15.sp,
+        letterSpacing = 0.2.sp
+    ),
+    labelSmall = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 11.sp,
+        letterSpacing = 0.5.sp
+    )
+)
+
+// 4. Ana Tema Sarıcısı
+@Composable
+fun QuickDoTheme(
+    darkTheme: Boolean = isSystemInDarkTheme(),
+    content: @Composable () -> Unit
+) {
+    val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
+
+    MaterialTheme(
+        colorScheme = colorScheme,
+        typography = QuickDoTypography, // Kendi tipografimizi bağlıyoruz
+        content = content
+    )
+}
 // --- YARDIMCI FONKSİYON 1: Tarihi Formatla ---
 fun formatMillisToDateString(millis: Long?): String {
     if (millis == null) return "Her Gün"
@@ -206,24 +292,33 @@ interface TodoDao {
 @Database(entities = [TodoItem::class, Category::class], version = 1)
 abstract class AppDatabase : RoomDatabase() { abstract fun todoDao(): TodoDao }
 
-enum class AppScreen { TASKS, CALENDAR, ADD_TASK, SETTINGS }
+enum class AppScreen { SPLASH, TASKS, CALENDAR, ADD_TASK, SETTINGS }
 enum class SortType(val label: String) { DEFAULT("Varsayılan Sıralama"), DATE_ASC("Önce Yakın Tarihliler"), DATE_DESC("Önce Uzak Tarihliler"), PRIORITY("Önce En Önemliler") }
 
+// --- 3. ANA AKTİVİTE ---
 // --- 3. ANA AKTİVİTE ---
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val db = Room.databaseBuilder(applicationContext, AppDatabase::class.java, "todo-db").build()
         val dao = db.todoDao()
-        setContent { MaterialTheme { Surface(color = MaterialTheme.colorScheme.background) { MainAppScaffold(dao) } } }
+
+        setContent {
+            // BURAYI DEĞİŞTİRDİK: Artık standart MaterialTheme değil, kendi QuickDoTheme'mızı kullanıyoruz!
+            QuickDoTheme {
+                Surface(color = MaterialTheme.colorScheme.background) {
+                    MainAppScaffold(dao)
+                }
+            }
+        }
     }
 }
 
-// --- 4. ANA İSKELET VE NAVİGASYON (SNACKBAR YÖNETİCİSİ EKLENDİ) ---
+// --- 4. ANA İSKELET VE NAVİGASYON (SPLASH VE AYARLAR EKLENDİ) ---
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainAppScaffold(dao: TodoDao) {
-    var currentScreen by remember { mutableStateOf(AppScreen.TASKS) }
+    var currentScreen by remember { mutableStateOf(AppScreen.SPLASH) } // İLK EKRAN ARTIK SPLASH!
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
@@ -281,25 +376,37 @@ fun MainAppScaffold(dao: TodoDao) {
         }
     ) {
         Scaffold(
-            // YENİ ADIM 2: Scaffold'a mesaj kutusunun nerede çıkacağını söylüyoruz
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
 
             topBar = {
-                TopAppBar(
-                    title = { Text(when(currentScreen) { AppScreen.TASKS -> "Görevlerim"; AppScreen.CALENDAR -> "Takvim"; AppScreen.ADD_TASK -> "Yeni Görev" ; AppScreen.SETTINGS -> "Ayarlar"}) },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-                    navigationIcon = { IconButton(onClick = { scope.launch { drawerState.open() } }) { Icon(Icons.Default.Menu, "Menüyü Aç") } },
-                    actions = { if (currentScreen == AppScreen.TASKS) { IconButton(onClick = { showFilterDialog = true }) { Text("🔽", style = MaterialTheme.typography.titleLarge) } } }
-                )
+                // YENİ: Splash ekranındayken menüyü gizle
+                if (currentScreen != AppScreen.SPLASH) {
+                    TopAppBar(
+                        title = {
+                            Text(when(currentScreen) {
+                                AppScreen.TASKS -> "Görevlerim"
+                                AppScreen.CALENDAR -> "Takvim"
+                                AppScreen.ADD_TASK -> "Yeni Görev"
+                                AppScreen.SETTINGS -> "Ayarlar"
+                                else -> "" // Splash ekranı için boşluk
+                            })
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                        navigationIcon = { IconButton(onClick = { scope.launch { drawerState.open() } }) { Icon(Icons.Default.Menu, "Menüyü Aç") } },
+                        actions = { if (currentScreen == AppScreen.TASKS) { IconButton(onClick = { showFilterDialog = true }) { Text("🔽", style = MaterialTheme.typography.titleLarge) } } }
+                    )
+                }
             },
             floatingActionButton = { if (currentScreen == AppScreen.TASKS) { FloatingActionButton(onClick = { currentScreen = AppScreen.ADD_TASK }) { Icon(Icons.Default.Add, "Görev Ekle") } } }
         ) { paddingValues ->
             Box(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
                 when (currentScreen) {
+                    // YENİ: Splash ekranı bağlandı, animasyon bitince TASKS'a geçecek!
+                    AppScreen.SPLASH -> SplashScreen(onTimeout = { currentScreen = AppScreen.TASKS })
+
                     AppScreen.TASKS -> TaskListScreen(dao, allTasks, categories, currentSortType, currentCategoryFilter, snackbarHostState)
                     AppScreen.CALENDAR -> CalendarViewScreen(dao, allTasks, categories, snackbarHostState)
                     AppScreen.ADD_TASK -> AddTaskScreen(dao = dao, onNavigateBack = { currentScreen = AppScreen.TASKS })
-                    // İŞTE YENİ EKLENEN SATIR BURASI:
                     AppScreen.SETTINGS -> SettingsScreen(dao = dao, snackbarHostState = snackbarHostState)
                 }
             }
@@ -453,9 +560,16 @@ fun TaskListScreen(
     }
 
     if (displayItems.isEmpty()) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (filterCategory == null) "Görev yok. Sağ alttaki + butonuna tıkla!" else "Bu kriterlere uygun görev bulunamadı.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        // ESKİ SIKICI YAZI YERİNE YENİ MODERN BOŞ EKRAN:
+        EmptyTaskState(
+            message = if (filterCategory == null)
+                "Şu an yapılacak hiçbir görev yok. Arkanı yasla ve kahvenin tadını çıkar veya sağ alttan yeni bir görev ekle."
+            else
+                "Bu kategoriye ait görev bulunamadı."
+        )
     } else {
         LazyColumn(contentPadding = PaddingValues(16.dp)) {
+            // ... items(...) bloğu aynı kalıyor ...
             items(displayItems, key = { it.id }) { item ->
                 TodoItemRow(
                     item = item,
@@ -581,17 +695,21 @@ fun TodoItemRow(
         },
         content = {
             Card(
+                // YENİ: Kartın köşelerini iyice yumuşattık (Modern 20.dp)
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 4.dp)
+                    .padding(vertical = 6.dp, horizontal = 2.dp) // Kartlar arası boşluğu biraz açtık
                     .combinedClickable(
                         onClick = { expanded = !expanded },
                         onLongClick = { onEditClick() }
                     )
                     .animateContentSize(),
-                elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 6.dp else 2.dp),
+                // YENİ: Siyah gölge (elevation) yerine 0.dp verip, sadece renk tonuyla derinlik katıyoruz
+                elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 8.dp else 0.dp),
                 colors = CardDefaults.cardColors(containerColor = cardColor)
             ) {
+                // ... Column ve geri kalan içerik aynı kalıyor ...
                 Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = item.isDone, onCheckedChange = onCheckedChange)
@@ -900,6 +1018,85 @@ fun SettingsScreen(dao: TodoDao, snackbarHostState: SnackbarHostState) {
                 }
                 Icon(Icons.Default.Delete, contentDescription = "Sil", tint = Color.Red)
             }
+        }
+    }
+}
+// --- 11. MODERN BOŞ EKRAN TASARIMI ---
+@Composable
+fun EmptyTaskState(message: String) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(32.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // Yumuşak, yarı saydam bir başarı ikonu
+        Icon(
+            imageVector = Icons.Default.Star,
+            contentDescription = "Boş",
+            modifier = Modifier.size(100.dp),
+            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+        )
+        Spacer(modifier = Modifier.height(24.dp))
+        Text(
+            text = "Her Şey Tamam!",
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
+    }
+}
+// --- 12. ANİMASYONLU AÇILIŞ (SPLASH) EKRANI (RENK EŞİTLENDİ) ---
+@Composable
+fun SplashScreen(onTimeout: () -> Unit) {
+    val scale = remember { Animatable(0f) }
+
+    LaunchedEffect(Unit) {
+        scale.animateTo(
+            targetValue = 1f,
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioMediumBouncy,
+                stiffness = Spring.StiffnessLow
+            )
+        )
+        delay(1500)
+        onTimeout()
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            // BURAYI GÜNCELLEDİK: Logomuzun arka plan rengiyle birebir aynı yaptık
+            .background(Color(0xFF2563EB)),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Image(
+                painter = painterResource(id = R.drawable.quickdo_logo),
+                contentDescription = "QuickDo Logo",
+                modifier = Modifier
+                    .size(180.dp) // Logoyu biraz daha heybetli yaptık usta
+                    .scale(scale.value)
+
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Text(
+                text = "QuickDo",
+                // Başlıkta da aynı uyumu yakalamak için beyaz yapıyoruz
+                style = MaterialTheme.typography.headlineMedium.copy(
+                    fontSize = 40.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color.White
+                ),
+                modifier = Modifier.scale(scale.value)
+            )
         }
     }
 }
