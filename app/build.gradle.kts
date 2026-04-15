@@ -46,4 +46,8 @@ dependencies {
     // YENİ: Jetpack Glance (Widget Tasarım Motoru)
     implementation("androidx.glance:glance-appwidget:1.0.0")
     implementation("androidx.glance:glance-material3:1.0.0")
+
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
+
+    implementation("com.airbnb.android:lottie-compose:6.4.0")
 }

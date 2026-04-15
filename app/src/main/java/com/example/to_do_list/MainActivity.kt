@@ -61,6 +61,32 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.ui.res.painterResource
 import kotlinx.coroutines.delay
 import androidx.compose.foundation.Image
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.flow.map
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.foundation.shape.RoundedCornerShape
+
+// Hafıza dosyasını tanımlıyoruz
+val Context.dataStore by preferencesDataStore(name = "settings")
+
+class SettingsManager(private val context: Context) {
+    private val IS_DARK_MODE = booleanPreferencesKey("is_dark_mode")
+
+    // Tercihi oku (Veri tipini açıkça belirterek hatayı giderdik)
+    val isDarkMode: kotlinx.coroutines.flow.Flow<Boolean?> = context.dataStore.data
+        .map { preferences ->
+            preferences[IS_DARK_MODE]
+        }
+
+    // Tercihi kaydet
+    suspend fun setDarkMode(enabled: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[IS_DARK_MODE] = enabled
+        }
+    }
+}
 
 // --- 🌟 QUICKDO PROFESYONEL TEMA MOTORU ---
 
@@ -275,6 +301,10 @@ data class TodoItem(
 // --- 2. VERİTABANI SORGULARI ---
 @Dao
 interface TodoDao {
+    @Delete
+    suspend fun deleteCategory(category: Category)
+    @Query("DELETE FROM todo_table")
+    suspend fun deleteAllTasks()
     @Query("SELECT * FROM todo_table ORDER BY isDone ASC, priority DESC, id DESC")
     fun getAll(): Flow<List<TodoItem>>
 
@@ -292,7 +322,7 @@ interface TodoDao {
 @Database(entities = [TodoItem::class, Category::class], version = 1)
 abstract class AppDatabase : RoomDatabase() { abstract fun todoDao(): TodoDao }
 
-enum class AppScreen { SPLASH, TASKS, CALENDAR, ADD_TASK, SETTINGS }
+enum class AppScreen { SPLASH, TASKS, CALENDAR, ADD_TASK, STATS, SETTINGS }
 enum class SortType(val label: String) { DEFAULT("Varsayılan Sıralama"), DATE_ASC("Önce Yakın Tarihliler"), DATE_DESC("Önce Uzak Tarihliler"), PRIORITY("Önce En Önemliler") }
 
 // --- 3. ANA AKTİVİTE ---
@@ -314,23 +344,33 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// --- 4. ANA İSKELET VE NAVİGASYON (SPLASH VE AYARLAR EKLENDİ) ---
+
+// --- 4. ANA İSKELET VE NAVİGASYON (HAFIZA, TEMA VE TÜM EKRANLAR BAĞLANDI) ---
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainAppScaffold(dao: TodoDao) {
-    var currentScreen by remember { mutableStateOf(AppScreen.SPLASH) } // İLK EKRAN ARTIK SPLASH!
-    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    // 1. HAFIZA VE TEMA YÖNETİMİ
+    val context = LocalContext.current
+    val settingsManager = remember { SettingsManager(context) }
     val scope = rememberCoroutineScope()
 
-    // YENİ ADIM 1: Snackbar (Alttan çıkan mesaj) Yöneticisini tanımlıyoruz
-    val snackbarHostState = remember { SnackbarHostState() }
+    // Hafızadaki karanlık mod tercihini dinle
+    val savedDarkMode by settingsManager.isDarkMode.collectAsState(initial = isSystemInDarkTheme())
+    val isDarkMode = savedDarkMode ?: isSystemInDarkTheme()
 
+    // 2. NAVİGASYON VE DURUM DEĞİŞKENLERİ
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val snackbarHostState = remember { SnackbarHostState() }
+    var currentScreen by remember { mutableStateOf(AppScreen.SPLASH) }
+
+    // Veritabanı ve Filtreleme Değişkenleri
     val categories by dao.getAllCategories().collectAsState(initial = emptyList())
     val allTasks by dao.getAll().collectAsState(initial = emptyList())
     var showFilterDialog by remember { mutableStateOf(false) }
     var currentSortType by remember { mutableStateOf(SortType.DEFAULT) }
     var currentCategoryFilter by remember { mutableStateOf<Category?>(null) }
 
+    // 3. BAŞLANGIÇ KATEGORİLERİ (Eğer boşsa)
     LaunchedEffect(Unit) {
         if (dao.getCategoryCount() == 0) {
             dao.insertCategory(Category(name = "💊 İlaç Hatırlatıcısı", colorCode = 0xFFE53935))
@@ -339,75 +379,202 @@ fun MainAppScaffold(dao: TodoDao) {
         }
     }
 
-    if (showFilterDialog) {
-        AlertDialog(
-            onDismissRequest = { showFilterDialog = false },
-            title = { Text("Filtrele ve Sırala") },
-            text = {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Text("Sıralama Ölçütü", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                    SortType.values().forEach { sortType ->
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { currentSortType = sortType }.padding(vertical = 4.dp)) { RadioButton(selected = currentSortType == sortType, onClick = { currentSortType = sortType }); Text(text = sortType.label, modifier = Modifier.padding(start = 8.dp)) }
-                    }
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    Text("Kategori Filtresi", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { currentCategoryFilter = null }.padding(vertical = 4.dp)) { RadioButton(selected = currentCategoryFilter == null, onClick = { currentCategoryFilter = null }); Text("Tüm Kategoriler", modifier = Modifier.padding(start = 8.dp)) }
-                    categories.forEach { cat ->
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { currentCategoryFilter = cat }.padding(vertical = 4.dp)) { RadioButton(selected = currentCategoryFilter == cat, onClick = { currentCategoryFilter = cat }); Box(modifier = Modifier.padding(start = 8.dp).size(12.dp).background(Color(cat.colorCode), CircleShape)); Text(cat.name, modifier = Modifier.padding(start = 8.dp)) }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { showFilterDialog = false }) { Text("Uygula") } }
-        )
-    }
+    // 4. TEMA SARMALAYICI (En Dışta)
+    QuickDoTheme(darkTheme = isDarkMode) {
+        Surface(color = MaterialTheme.colorScheme.background) {
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            ModalDrawerSheet {
-                Spacer(Modifier.height(24.dp))
-                Text("QuickDo", modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
-                HorizontalDivider()
-                NavigationDrawerItem(label = { Text("📋 Görevlerim") }, selected = currentScreen == AppScreen.TASKS, onClick = { currentScreen = AppScreen.TASKS; scope.launch { drawerState.close() } }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
-                NavigationDrawerItem(label = { Text("📅 Takvim") }, selected = currentScreen == AppScreen.CALENDAR, onClick = { currentScreen = AppScreen.CALENDAR; scope.launch { drawerState.close() } }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
-                NavigationDrawerItem(label = { Text("⚙️ Ayarlar") }, selected = currentScreen == AppScreen.SETTINGS, onClick = { currentScreen = AppScreen.SETTINGS; scope.launch { drawerState.close() } }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
+            // Filtreleme Dialog'u
+            if (showFilterDialog) {
+                AlertDialog(
+                    onDismissRequest = { showFilterDialog = false },
+                    title = { Text("Filtrele ve Sırala") },
+                    text = {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text("Sıralama Ölçütü", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            SortType.entries.forEach { sortType ->
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { currentSortType = sortType }.padding(vertical = 4.dp)) {
+                                    RadioButton(selected = currentSortType == sortType, onClick = { currentSortType = sortType })
+                                    Text(text = sortType.label, modifier = Modifier.padding(start = 8.dp))
+                                }
+                            }
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                            Text("Kategori Filtresi", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable { currentCategoryFilter = null }.padding(vertical = 4.dp)) {
+                                RadioButton(selected = currentCategoryFilter == null, onClick = { currentCategoryFilter = null })
+                                Text("Tüm Kategoriler", modifier = Modifier.padding(start = 8.dp))
+                            }
+                            categories.forEach { cat ->
+                                // Row'u "SpaceBetween" yaparak yazıyı sola, ikonu en sağa yaslıyoruz
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    // Sol taraf: Seçim alanı (RadioButton + Renk + İsim)
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .weight(1f) // Yazının geniş alanı kaplamasını sağlar
+                                            .clickable { currentCategoryFilter = cat }
+                                    ) {
+                                        RadioButton(
+                                            selected = currentCategoryFilter == cat,
+                                            onClick = { currentCategoryFilter = cat }
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .padding(start = 4.dp)
+                                                .size(12.dp)
+                                                .background(Color(cat.colorCode), CircleShape)
+                                        )
+                                        Text(
+                                            text = cat.name,
+                                            modifier = Modifier.padding(start = 8.dp),
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+                                    }
+
+                                    // Sağ taraf: SİLME BUTONU
+                                    IconButton(
+                                        onClick = {
+                                            scope.launch {
+                                                dao.deleteCategory(cat) // Silme işlemi burada
+                                                if (currentCategoryFilter == cat) {
+                                                    currentCategoryFilter = null
+                                                }
+                                                snackbarHostState.showSnackbar("${cat.name} başarıyla silindi.")
+                                            }
+                                        }
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Delete,
+                                            contentDescription = "Kategoriyi Sil",
+                                            tint = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.size(20.dp) // Kibar bir boyutta
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = { TextButton(onClick = { showFilterDialog = false }) { Text("Uygula") } }
+                )
             }
-        }
-    ) {
-        Scaffold(
-            snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
 
-            topBar = {
-                // YENİ: Splash ekranındayken menüyü gizle
-                if (currentScreen != AppScreen.SPLASH) {
-                    TopAppBar(
-                        title = {
-                            Text(when(currentScreen) {
-                                AppScreen.TASKS -> "Görevlerim"
-                                AppScreen.CALENDAR -> "Takvim"
-                                AppScreen.ADD_TASK -> "Yeni Görev"
-                                AppScreen.SETTINGS -> "Ayarlar"
-                                else -> "" // Splash ekranı için boşluk
-                            })
-                        },
-                        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-                        navigationIcon = { IconButton(onClick = { scope.launch { drawerState.open() } }) { Icon(Icons.Default.Menu, "Menüyü Aç") } },
-                        actions = { if (currentScreen == AppScreen.TASKS) { IconButton(onClick = { showFilterDialog = true }) { Text("🔽", style = MaterialTheme.typography.titleLarge) } } }
-                    )
+            ModalNavigationDrawer(
+                drawerState = drawerState,
+                drawerContent = {
+                    ModalDrawerSheet {
+                        Spacer(Modifier.height(24.dp))
+                        Text(
+                            text = "QuickDo",
+                            modifier = Modifier.padding(16.dp),
+                            style = MaterialTheme.typography.headlineMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        HorizontalDivider()
+
+                        // 1. Görevlerim
+                        NavigationDrawerItem(
+                            label = { Text("📋 Görevlerim") },
+                            selected = currentScreen == AppScreen.TASKS,
+                            onClick = { currentScreen = AppScreen.TASKS; scope.launch { drawerState.close() } },
+                            modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
+                        )
+
+                        // 2. Takvim
+                        NavigationDrawerItem(
+                            label = { Text("📅 Takvim") },
+                            selected = currentScreen == AppScreen.CALENDAR,
+                            onClick = { currentScreen = AppScreen.CALENDAR; scope.launch { drawerState.close() } },
+                            modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
+                        )
+
+                        // 3. İstatistikler (Artık Ayarların üstünde)
+                        NavigationDrawerItem(
+                            label = { Text("📊 İstatistikler") },
+                            selected = currentScreen == AppScreen.STATS,
+                            onClick = { currentScreen = AppScreen.STATS; scope.launch { drawerState.close() } },
+                            modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
+                        )
+
+                        // Alt kısma bir boşluk veya ayırıcı ekleyebiliriz (Opsiyonel)
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+                        // 4. Ayarlar (En altta)
+                        NavigationDrawerItem(
+                            label = { Text("⚙️ Ayarlar") },
+                            selected = currentScreen == AppScreen.SETTINGS,
+                            onClick = { currentScreen = AppScreen.SETTINGS; scope.launch { drawerState.close() } },
+                            modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
+                        )
+                    }
                 }
-            },
-            floatingActionButton = { if (currentScreen == AppScreen.TASKS) { FloatingActionButton(onClick = { currentScreen = AppScreen.ADD_TASK }) { Icon(Icons.Default.Add, "Görev Ekle") } } }
-        ) { paddingValues ->
-            Box(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
-                when (currentScreen) {
-                    // YENİ: Splash ekranı bağlandı, animasyon bitince TASKS'a geçecek!
-                    AppScreen.SPLASH -> SplashScreen(onTimeout = { currentScreen = AppScreen.TASKS })
+            ) {
+                Scaffold(
+                    snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+                    topBar = {
+                        if (currentScreen != AppScreen.SPLASH) {
+                            TopAppBar(
+                                title = {
+                                    Text(
+                                        when(currentScreen) {
+                                            AppScreen.TASKS -> "Görevlerim"
+                                            AppScreen.CALENDAR -> "Takvim"
+                                            AppScreen.ADD_TASK -> "Yeni Görev"
+                                            AppScreen.SETTINGS -> "Ayarlar"
+                                            AppScreen.STATS -> "İstatistikler"
+                                            else -> "QuickDo"
+                                        }
+                                    )
+                                },
+                                navigationIcon = { IconButton(onClick = { scope.launch { drawerState.open() } }) { Icon(Icons.Default.Menu, "Menüyü Aç") } },
+                                actions = { if (currentScreen == AppScreen.TASKS) { IconButton(onClick = { showFilterDialog = true }) { Text("🔽", style = MaterialTheme.typography.titleLarge) } } }
+                            )
+                        }
+                    },
+                    floatingActionButton = { if (currentScreen == AppScreen.TASKS) { FloatingActionButton(onClick = { currentScreen = AppScreen.ADD_TASK }) { Icon(Icons.Default.Add, "Görev Ekle") } } }
+                ) { paddingValues ->
+                    Box(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
+                        when (currentScreen) {
+                            AppScreen.SPLASH -> SplashScreen(onTimeout = { currentScreen = AppScreen.TASKS })
 
-                    AppScreen.TASKS -> TaskListScreen(dao, allTasks, categories, currentSortType, currentCategoryFilter, snackbarHostState)
-                    AppScreen.CALENDAR -> CalendarViewScreen(dao, allTasks, categories, snackbarHostState)
-                    AppScreen.ADD_TASK -> AddTaskScreen(dao = dao, onNavigateBack = { currentScreen = AppScreen.TASKS })
-                    AppScreen.SETTINGS -> SettingsScreen(dao = dao, snackbarHostState = snackbarHostState)
+                            AppScreen.TASKS -> TaskListScreen(
+                                dao = dao,
+                                allTasks = allTasks,
+                                categories = categories,
+                                sortType = currentSortType,
+                                filterCategory = currentCategoryFilter,
+                                snackbarHostState = snackbarHostState
+                            )
+
+                            AppScreen.CALENDAR -> CalendarViewScreen(
+                                dao = dao,
+                                allTasks = allTasks,
+                                categories = categories,
+                                snackbarHostState = snackbarHostState
+                            )
+
+                            AppScreen.ADD_TASK -> AddTaskScreen(
+                                dao = dao,
+                                onNavigateBack = { currentScreen = AppScreen.TASKS }
+                            )
+
+                            AppScreen.SETTINGS -> SettingsScreen(
+                                dao = dao,
+                                snackbarHostState = snackbarHostState,
+                                isDarkMode = isDarkMode,
+                                onDarkModeChange = { enabled ->
+                                    scope.launch { settingsManager.setDarkMode(enabled) }
+
+                                }
+                            )
+                            AppScreen.STATS -> StatsScreen(allTasks = allTasks)
+                        }
+                    }
                 }
             }
         }
@@ -940,15 +1107,18 @@ fun EditTaskDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("İptal") } }
     )
 }
-// --- 10. AYARLAR EKRANI ---
+// --- 10. AYARLAR EKRANI (TEMA KONTROLÜ BAĞLANDI) ---
 @Composable
-fun SettingsScreen(dao: TodoDao, snackbarHostState: SnackbarHostState) {
+fun SettingsScreen(
+    dao: TodoDao,
+    snackbarHostState: SnackbarHostState,
+    isDarkMode: Boolean, // YENİ: Dışarıdan temanın durumunu alıyoruz
+    onDarkModeChange: (Boolean) -> Unit // YENİ: Değişimi dışarıya haber veriyoruz
+) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
-    // Not: Bu ayarlar şimdilik RAM'de tutuluyor. Kalıcı (uygulama kapanıp açılınca hatırlanan)
-    // hale getirmek için bir sonraki aşamada "DataStore" ekleyeceğiz. Şimdilik UI'ı (arayüzü) kuruyoruz.
-    var isDarkMode by remember { mutableStateOf(true) }
+    // Bildirim ayarı şimdilik lokalde kalabilir, kalıcı yapmak için sonra DataStore ekleriz
     var notificationsEnabled by remember { mutableStateOf(true) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
@@ -959,22 +1129,33 @@ fun SettingsScreen(dao: TodoDao, snackbarHostState: SnackbarHostState) {
             title = { Text("Tüm Verileri Sil?") },
             text = { Text("Bu işlem geri alınamaz. Veritabanındaki tüm görevleriniz kalıcı olarak uçurularak fabrika ayarlarına dönülecektir.") },
             confirmButton = {
-                Button(colors = ButtonDefaults.buttonColors(containerColor = Color.Red), onClick = {
-                    scope.launch {
-                        // Veritabanını tamamen temizleme işlemi
-                        dao.getAll().collect { tasks ->
-                            tasks.forEach { task ->
-                                cancelNotification(context, task.id) // Önce tüm alarmları iptal et
-                                dao.delete(task) // Sonra görevleri sil
-                            }
-                        }
-                        refreshQuickDoWidget(context)
+                Button(
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.Red),
+                    onClick = {
+                        // 1. ÖNCE PENCEREYİ KAPATIYORUZ (Takılı kalmasın)
                         showDeleteConfirm = false
-                        snackbarHostState.showSnackbar("Tüm görevler başarıyla temizlendi.")
+
+                        // 2. SONRA ARKA PLANDA TEMİZLİK YAPIYORUZ
+                        scope.launch {
+                            dao.deleteAllTasks() // Eğer DAO'da toplu silme metodun varsa daha hızlı olur
+                            // Yoksa eski usul devam:
+                            dao.getAll().collect { tasks ->
+                                tasks.forEach { task ->
+                                    cancelNotification(context, task.id)
+                                    dao.delete(task)
+                                }
+                            }
+                            refreshQuickDoWidget(context)
+                            snackbarHostState.showSnackbar("Tüm görevler başarıyla temizlendi.")
+                        }
                     }
-                }) { Text("Evet, Her Şeyi Sil", color = Color.White) }
+                ) { Text("Evet, Her Şeyi Sil", color = Color.White) }
             },
-            dismissButton = { TextButton(onClick = { showDeleteConfirm = false }) { Text("Vazgeç") } }
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) {
+                    Text("Vazgeç")
+                }
+            }
         )
     }
 
@@ -989,7 +1170,11 @@ fun SettingsScreen(dao: TodoDao, snackbarHostState: SnackbarHostState) {
                         Text("Karanlık Tema", fontWeight = FontWeight.Bold)
                         Text("Uygulamayı koyu renk tonlarında kullan", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Switch(checked = isDarkMode, onCheckedChange = { isDarkMode = it })
+                    // KRİTİK DEĞİŞİKLİK: Switch artık dışarıdaki isDarkMode'u değiştiriyor
+                    Switch(
+                        checked = isDarkMode,
+                        onCheckedChange = { onDarkModeChange(it) }
+                    )
                 }
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 8.dp))
                 Row(modifier = Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
@@ -1097,6 +1282,91 @@ fun SplashScreen(onTimeout: () -> Unit) {
                 ),
                 modifier = Modifier.scale(scale.value)
             )
+        }
+    }
+}
+// --- 14. İSTATİSTİK EKRANI (ÜRETKENLİK ÖZETİ) ---
+@Composable
+fun StatsScreen(allTasks: List<TodoItem>) {
+    val total = allTasks.size
+    val completed = allTasks.count { it.isDone }
+    // Yüzde hesabı (0'a bölünme hatasını engellemek için kontrol ekledik)
+    val percent = if (total > 0) (completed.toFloat() / total * 100).toInt() else 0
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = "Üretkenlik Özeti",
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(40.dp))
+
+        // --- BAŞARI HALKASI ---
+        Box(contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(
+                progress = { percent / 100f }, // Compose 1.5+ kullanımı
+                modifier = Modifier.size(160.dp),
+                strokeWidth = 12.dp,
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                strokeCap = StrokeCap.Round
+            )
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = "%$percent",
+                    style = MaterialTheme.typography.displaySmall,
+                    fontWeight = FontWeight.ExtraBold
+                )
+                Text(
+                    text = "Başarı",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(48.dp))
+
+        // --- BİLGİ KARTLARI ---
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            InfoCard(label = "Toplam", value = total.toString(), modifier = Modifier.weight(1f))
+            InfoCard(label = "Tamamlanan", value = completed.toString(), modifier = Modifier.weight(1f))
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        InfoCard(
+            label = "Kalan İşler",
+            value = (total - completed).toString(),
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+// Kart tasarımı için yardımcı fonksiyon
+@Composable
+fun InfoCard(label: String, value: String, modifier: Modifier = Modifier) {
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(text = label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(text = value, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
         }
     }
 }
